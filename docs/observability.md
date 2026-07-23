@@ -191,3 +191,25 @@ Dashboard definitions live in [`tools/setup-gcp/dashboards/`](../tools/setup-gcp
 ```sh
 go run ./tools/setup-gcp create dashboards   # also part of: bootstrap
 ```
+
+---
+
+## 6. Custom Telemetry in Actor Workloads
+
+When user application actors emit custom metrics or trace spans via OpenTelemetry (OTel) push exporters (such as `otlpmetricgrpc` or `otlptracegrpc`), the push export interval (e.g. 60s) may be longer than the actor's active execution window before suspension (e.g. 30s).
+
+### Telemetry Behavior Across Snapshot Modes
+
+The continuity of in-memory telemetry depends directly on the actor template's `snapshotsConfig.onPause` scope:
+
+| Snapshot Mode (`snapshotsConfig.onPause`) | What is Checkpointed | Process RAM Saved? | Telemetry Loss Risk | Delivery & Timer Behavior |
+| :--- | :--- | :--- | :--- | :--- |
+| **`Full` (Default)** | Process RAM + Rootfs delta | **YES** (`runsc checkpoint`) | **~0% Loss** | In-memory OTel buffers in RAM are restored intact under standard resume. Exporter fires **immediately upon resume** because wall-clock time passed the push deadline during suspension. Subject to backend retention window expiration if actor remains suspended for long periods. |
+| **`Data`** | `DurableDir` disk volumes only | **NO** (Process killed on pause) | **100% Loss** of pre-pause buffer | In-memory OTel buffers are lost when process is stopped, unless flushed pre-pause (`ForceFlush()`) or saved to `DurableDir`. |
+
+### Best Practices for Actor Developers
+
+1. **Use `Full` Snapshot Mode for In-Memory OTel Workloads**: Set `snapshotsConfig.onPause: Full` in your `ActorTemplate` spec to preserve in-memory telemetry buffers across suspend/resume cycles.
+2. **Register Signal Handlers for Graceful Flush**: Handle lifecycle signals (`SIGTERM`, `SIGINT`, `SIGUSR1`) in your actor code to invoke `meterProvider.ForceFlush(ctx)` / `tracerProvider.ForceFlush(ctx)` before shutdown.
+3. **Flush Telemetry Before Self-Suspend**: If your actor triggers its own suspension via the Substrate API, execute `ForceFlush()` immediately prior to making the suspend call.
+4. **Enable OTLP Exporter Auto-Reconnection**: Ensure OTLP gRPC/HTTP push exporters use automatic retry/re-dialing so transport connections transparently recover when an actor is restored onto a new worker pod with a new IP.
