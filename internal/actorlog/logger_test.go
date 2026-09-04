@@ -104,7 +104,7 @@ func identityLabels() map[string]string {
 
 func TestWrapContainerLogs(t *testing.T) {
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader("Test application log output\n"), testAttribution, testContainer)
 
 	m := decodeLine(t, &buf)
@@ -125,7 +125,7 @@ func TestWrapContainerLogs_JSONInput(t *testing.T) {
 	input := `{"level":"info","msg":"Started container","custom_attr":"value","count":1234567890123456789,"time":"2026-05-16T01:03:37Z"}` + "\n"
 
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader(input), testAttribution, testContainer)
 
 	m := decodeLine(t, &buf)
@@ -160,7 +160,7 @@ func TestWrapContainerLogs_ActorTraceContextPassthrough(t *testing.T) {
 	input := `{"msg":"handled","` + ateattr.LogTraceIDField + `":"` + traceID + `","` + ateattr.LogSpanIDField + `":"` + spanID + `"}` + "\n"
 
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader(input), testAttribution, testContainer)
 
 	m := decodeLine(t, &buf)
@@ -209,7 +209,7 @@ func TestWrapContainerLogs_MergeLabels(t *testing.T) {
 	input := `{"level":"info","msg":"App log","labels":{"app":"my-app","version":"v1"}}` + "\n"
 
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader(input), testAttribution, testContainer)
 
 	labels := labelGroup(t, al, decodeLine(t, &buf))
@@ -228,7 +228,7 @@ func TestWrapContainerLogs_ReservedNamespace(t *testing.T) {
 		`"labels":{"` + actorNameLabel + `":"malicious-name","` + actorUIDLabel + `":"malicious-uid","ate.tenant":"forged","app":"my-app"}}` + "\n"
 
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader(input), testAttribution, testContainer)
 
 	m := decodeLine(t, &buf)
@@ -269,7 +269,7 @@ func TestWrapContainerLogs_ForeignLabelGroup(t *testing.T) {
 				`"ate.tenant":"forged","app":"my-app"}}` + "\n"
 
 			var buf bytes.Buffer
-			al := NewActorLogger(&buf, tt.onGCE)
+			al := NewActorLogger(&buf, tt.onGCE, "")
 			al.WrapContainerLogs(strings.NewReader(input), testAttribution, testContainer)
 
 			m := decodeLine(t, &buf)
@@ -298,7 +298,7 @@ func TestWrapContainerLogs_NonStringLabelValue(t *testing.T) {
 	input := `{"msg":"App log","labels":{"replicas":3,"enabled":true,"nested":{"a":1},"empty":null}}` + "\n"
 
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader(input), testAttribution, testContainer)
 
 	labels := labelGroup(t, al, decodeLine(t, &buf))
@@ -317,7 +317,7 @@ func TestWrapContainerLogs_NonStringLabelValue(t *testing.T) {
 
 func TestWrapContainerLogs_JSONNull(t *testing.T) {
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader("null\n"), testAttribution, testContainer)
 
 	m := decodeLine(t, &buf)
@@ -331,7 +331,7 @@ func TestWrapContainerLogs_TrailingGarbage(t *testing.T) {
 	const line = `{"count": 1} garbage`
 
 	var buf bytes.Buffer
-	al := NewActorLogger(&buf, false)
+	al := NewActorLogger(&buf, false, "")
 	al.WrapContainerLogs(strings.NewReader(line+"\n"), testAttribution, testContainer)
 
 	m := decodeLine(t, &buf)
@@ -390,7 +390,7 @@ func TestEmitLifecycleLog(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			al := NewActorLogger(&buf, false)
+			al := NewActorLogger(&buf, false, "")
 			al.EmitLifecycleLog(tt.ctx, msg, testAttribution)
 
 			m := decodeLine(t, &buf)
@@ -449,4 +449,42 @@ func mustSpanID(t *testing.T, s string) trace.SpanID {
 		t.Fatalf("SpanIDFromHex(%q): %v", s, err)
 	}
 	return id
+}
+
+// TestEmitLifecycleLog_GCETraceKeys covers the Cloud Logging spellings: with a
+// trace project set, a lifecycle record carries the promoted trace fields the
+// console links on; without one, they stay absent.
+func TestEmitLifecycleLog_GCETraceKeys(t *testing.T) {
+	const (
+		traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+		spanID  = "00f067aa0ba902b7"
+	)
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    mustTraceID(t, traceID),
+		SpanID:     mustSpanID(t, spanID),
+		TraceFlags: trace.FlagsSampled,
+	}))
+
+	var buf bytes.Buffer
+	al := NewActorLogger(&buf, true, "test-project")
+	al.EmitLifecycleLog(ctx, "Actor restored", testAttribution)
+
+	m := decodeLine(t, &buf)
+	if got, want := m[ateattr.LogGCETraceField], "projects/test-project/traces/"+traceID; got != want {
+		t.Errorf("got %s = %v, want %q", ateattr.LogGCETraceField, got, want)
+	}
+	if got := m[ateattr.LogGCESpanIDField]; got != spanID {
+		t.Errorf("got %s = %v, want %q", ateattr.LogGCESpanIDField, got, spanID)
+	}
+	if got := m[ateattr.LogGCETraceSampledField]; got != true {
+		t.Errorf("got %s = %v, want true", ateattr.LogGCETraceSampledField, got)
+	}
+
+	buf.Reset()
+	al = NewActorLogger(&buf, true, "")
+	al.EmitLifecycleLog(ctx, "Actor restored", testAttribution)
+	m = decodeLine(t, &buf)
+	if _, present := m[ateattr.LogGCETraceField]; present {
+		t.Errorf("%s present without a trace project", ateattr.LogGCETraceField)
+	}
 }

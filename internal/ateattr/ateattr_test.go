@@ -191,6 +191,9 @@ func TestLogFieldSpellings(t *testing.T) {
 		{LogTraceIDField, "trace_id"},
 		{LogSpanIDField, "span_id"},
 		{LogTraceFlagsField, "trace_flags"},
+		{LogGCETraceField, "logging.googleapis.com/trace"},
+		{LogGCESpanIDField, "logging.googleapis.com/spanId"},
+		{LogGCETraceSampledField, "logging.googleapis.com/trace_sampled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {

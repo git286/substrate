@@ -64,6 +64,10 @@ func NewSyncedWriter(w io.Writer) *SyncedWriter {
 type ActorLogger struct {
 	writer    io.Writer
 	labelsKey string
+	// traceProject, when set, additionally records the trace context under the
+	// Cloud Logging special keys, which is what links a lifecycle record to its
+	// trace in the console. Empty means off GCE or project unknown.
+	traceProject string
 }
 
 // The two spellings of the label group. Cloud Logging promotes the second into
@@ -73,15 +77,19 @@ const (
 	labelsKeyGCE   = "logging.googleapis.com/labels"
 )
 
-// NewActorLogger creates a new ActorLogger wrapping the provided destination writer.
-func NewActorLogger(w io.Writer, isOnGCE bool) *ActorLogger {
+// NewActorLogger creates a new ActorLogger wrapping the provided destination
+// writer. traceProject qualifies the Cloud Logging trace links
+// ("projects/<project>/traces/<id>"); empty leaves the special keys off, so
+// callers off GCE pass "".
+func NewActorLogger(w io.Writer, isOnGCE bool, traceProject string) *ActorLogger {
 	labelsKey := labelsKeyPlain
 	if isOnGCE {
 		labelsKey = labelsKeyGCE
 	}
 	return &ActorLogger{
-		writer:    w,
-		labelsKey: labelsKey,
+		writer:       w,
+		labelsKey:    labelsKey,
+		traceProject: traceProject,
 	}
 }
 
@@ -93,7 +101,7 @@ func (al *ActorLogger) EmitLifecycleLog(ctx context.Context, msg string, a resou
 		"message":    msg,
 		al.labelsKey: ateattr.ActorLogLabels(a, ""),
 	}
-	addTraceContext(ctx, envelope)
+	al.addTraceContext(ctx, envelope)
 	al.write(envelope)
 }
 
@@ -183,7 +191,7 @@ func (al *ActorLogger) write(envelope map[string]any) {
 	}
 }
 
-func addTraceContext(ctx context.Context, envelope map[string]any) {
+func (al *ActorLogger) addTraceContext(ctx context.Context, envelope map[string]any) {
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
 		return
@@ -191,6 +199,13 @@ func addTraceContext(ctx context.Context, envelope map[string]any) {
 	envelope[ateattr.LogTraceIDField] = sc.TraceID().String()
 	envelope[ateattr.LogSpanIDField] = sc.SpanID().String()
 	envelope[ateattr.LogTraceFlagsField] = fmt.Sprintf("%02x", byte(sc.TraceFlags()))
+	// The Cloud Logging spellings are what link the record to its trace in the
+	// console; the fields above are inert there (see ateattr).
+	if al.traceProject != "" {
+		envelope[ateattr.LogGCETraceField] = "projects/" + al.traceProject + "/traces/" + sc.TraceID().String()
+		envelope[ateattr.LogGCESpanIDField] = sc.SpanID().String()
+		envelope[ateattr.LogGCETraceSampledField] = sc.IsSampled()
+	}
 }
 
 // foldLabelGroups reduces the record to a single sanitized label group, under the

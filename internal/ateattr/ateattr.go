@@ -72,6 +72,17 @@ const (
 	LogTraceFlagsField = "trace_flags"
 )
 
+// The Cloud Logging spellings of the same trace context. On GCE the logging
+// agent promotes these into LogEntry.trace/spanId/traceSampled, which is what
+// links a log line to its trace in the console; the OTel spellings above are
+// inert there. LogGCETraceField carries the full resource name
+// ("projects/<project>/traces/<trace-id>"), not the bare hex ID.
+const (
+	LogGCETraceField        = "logging.googleapis.com/trace"
+	LogGCESpanIDField       = "logging.googleapis.com/spanId"
+	LogGCETraceSampledField = "logging.googleapis.com/trace_sampled"
+)
+
 // OTLPRelayKey is a resource attribute rather than a subject one: it describes
 // how the emitting component reached the collector, not what the signal is about.
 // Only the components that have a relay to take or miss carry it.

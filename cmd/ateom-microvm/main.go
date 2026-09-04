@@ -45,6 +45,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/atunnel"
+	"github.com/agent-substrate/substrate/internal/contextlogging"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -201,7 +202,7 @@ func do(ctx context.Context) error {
 	// JSON with ate.dev/* labels (logging parity with ateom-gvisor). It shares
 	// logWriter with the runtime logger so the two streams to os.Stdout are
 	// serialized through one SyncedWriter and never interleave-corrupt lines.
-	actorLogger := actorlog.NewActorLogger(logWriter, metadata.OnGCE())
+	actorLogger := actorlog.NewActorLogger(logWriter, metadata.OnGCE(), contextlogging.DetectGCETraceProject(ctx))
 	upstream, err := url.Parse(actorHTTPUpstream)
 	if err != nil {
 		return fmt.Errorf("while parsing atunnel upstream: %w", err)

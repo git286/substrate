@@ -133,3 +133,41 @@ func TestHandleUngroupedKeepsTraceFieldsTopLevel(t *testing.T) {
 		t.Errorf("%s = %v, want %q at the top level, got record %v", ateattr.LogTraceIDField, rec[ateattr.LogTraceIDField], testTraceID, rec)
 	}
 }
+
+// TestHandleGCETraceKeys covers the Cloud Logging spellings: qualified trace
+// resource name, span ID, and the sampled bit, present only when a trace
+// project is configured.
+func TestHandleGCETraceKeys(t *testing.T) {
+	ctx := trace.ContextWithSpanContext(context.Background(), spanContext(t, trace.FlagsSampled))
+
+	var buf bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&buf, nil), WithGCETraceProject("test-project")))
+	logger.InfoContext(ctx, "something happened")
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("failed to parse log record %q: %v", buf.String(), err)
+	}
+	if got, want := rec[ateattr.LogGCETraceField], "projects/test-project/traces/"+testTraceID; got != want {
+		t.Errorf("got %s = %v, want %q", ateattr.LogGCETraceField, got, want)
+	}
+	if got := rec[ateattr.LogGCESpanIDField]; got != testSpanID {
+		t.Errorf("got %s = %v, want %q", ateattr.LogGCESpanIDField, got, testSpanID)
+	}
+	if got := rec[ateattr.LogGCETraceSampledField]; got != true {
+		t.Errorf("got %s = %v, want true", ateattr.LogGCETraceSampledField, got)
+	}
+
+	buf.Reset()
+	logger = slog.New(NewHandler(slog.NewJSONHandler(&buf, nil)))
+	logger.InfoContext(ctx, "something happened")
+	rec = map[string]any{}
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("failed to parse log record %q: %v", buf.String(), err)
+	}
+	for _, field := range []string{ateattr.LogGCETraceField, ateattr.LogGCESpanIDField, ateattr.LogGCETraceSampledField} {
+		if got, present := rec[field]; present {
+			t.Errorf("%s = %v, want absent without a trace project", field, got)
+		}
+	}
+}

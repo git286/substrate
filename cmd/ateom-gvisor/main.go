@@ -118,7 +118,11 @@ func do(ctx context.Context) error {
 	defer cancel()
 
 	syncedWriter := actorlog.NewSyncedWriter(os.Stdout)
-	logger := slog.New(contextlogging.NewHandler(slog.NewJSONHandler(syncedWriter, &slog.HandlerOptions{Level: serverboot.LogLevel()})))
+	traceProject := contextlogging.DetectGCETraceProject(ctx)
+	logger := slog.New(contextlogging.NewHandler(
+		slog.NewJSONHandler(syncedWriter, &slog.HandlerOptions{Level: serverboot.LogLevel()}),
+		contextlogging.WithGCETraceProject(traceProject),
+	))
 	slog.SetDefault(logger)
 	if err := serverboot.SetLogLevel(*logLevelFlag); err != nil {
 		return err
@@ -200,7 +204,7 @@ func do(ctx context.Context) error {
 		return fmt.Errorf("while creating ateom-interior netns: %w", err)
 	}
 
-	actorLogger := actorlog.NewActorLogger(syncedWriter, metadata.OnGCE())
+	actorLogger := actorlog.NewActorLogger(syncedWriter, metadata.OnGCE(), traceProject)
 	upstream, err := url.Parse(actorHTTPUpstream)
 	if err != nil {
 		return fmt.Errorf("while parsing atunnel upstream: %w", err)

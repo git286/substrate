@@ -55,7 +55,10 @@ func InitLogger() {
 // one synchronized writer between the runtime logger and a separate writer (e.g.
 // ateom's actor-log forwarder) so their lines don't interleave.
 func InitLoggerWithWriter(w io.Writer) {
-	slog.SetDefault(slog.New(contextlogging.NewHandler(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: &logLevel}))))
+	slog.SetDefault(slog.New(contextlogging.NewHandler(
+		slog.NewJSONHandler(w, &slog.HandlerOptions{Level: &logLevel}),
+		contextlogging.WithGCETraceProject(contextlogging.DetectGCETraceProject(context.Background())),
+	)))
 }
 
 // logLevel is the dynamic minimum level behind the serverboot loggers.
