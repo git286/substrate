@@ -30,6 +30,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/contextlogging"
+	"github.com/agent-substrate/substrate/internal/otlpenv"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
@@ -176,14 +177,15 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(opts.Sampling.Sampler()),
 	}
-	expOpts := []otlptracegrpc.Option{
-		// GKE managed traces doesn't support validating the TLS certs of the collector.
-		otlptracegrpc.WithInsecure(),
-	}
+	var expOpts []otlptracegrpc.Option
+	transport := slog.String("transport", "caller-provided connection")
 	if opts.ExporterConn != nil {
-		// WithGRPCConn takes precedence over endpoint/credential options, so
-		// WithInsecure above is inert on this path.
+		// WithGRPCConn takes precedence over endpoint and credential options: the
+		// caller's connection decides the transport.
 		expOpts = append(expOpts, otlptracegrpc.WithGRPCConn(opts.ExporterConn))
+	} else {
+		expOpts = append(expOpts, exporterTransportOptions(otlptracegrpc.WithInsecure)...)
+		transport = slog.Any("transport", warnMisconfigured(ctx, otlpenv.Resolve(otlpenv.Traces)))
 	}
 	exporter, err := otlptracegrpc.New(ctx, expOpts...)
 	if err != nil {
@@ -194,8 +196,35 @@ func InitTracing(ctx context.Context, opts TracingOptions) (*sdktrace.TracerProv
 	tp := sdktrace.NewTracerProvider(tpOpts...)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
-	slog.InfoContext(ctx, "Tracing initialized", slog.String("sampler", opts.Sampling.Sampler().Description()))
+	slog.InfoContext(ctx, "Tracing initialized", slog.String("sampler", opts.Sampling.Sampler().Description()), transport)
 	return tp, nil
+}
+
+// warnMisconfigured logs once at startup when the OTLP variables describe a
+// connection that cannot work, so the cause is next to the transport line
+// rather than buried in the SDK's per-export errors.
+func warnMisconfigured(ctx context.Context, t otlpenv.Transport) otlpenv.Transport {
+	if t.Warning != "" {
+		slog.WarnContext(ctx, "OTLP exporter misconfigured", slog.String("warning", t.Warning))
+	}
+	return t
+}
+
+// exporterTransportOptions returns the transport option an OTLP exporter that
+// dials the collector itself needs, given that exporter's WithInsecure.
+//
+// Normally none: the SDK infers plaintext or TLS from the endpoint's scheme and
+// honors OTEL_EXPORTER_OTLP_INSECURE and the certificate variables, so an
+// https:// collector gets TLS and a custom CA or client certificate applies. The
+// one exception is a process with no OTEL_EXPORTER_OTLP_* variable at all. The
+// SDK would then dial its default of localhost:4317 over TLS, which the local
+// collectors developers run beside a `go run` do not speak, so that case keeps
+// the plaintext default the exporters always had.
+func exporterTransportOptions[O any](withInsecure func() O) []O {
+	if otlpenv.Configured() {
+		return nil
+	}
+	return []O{withInsecure()}
 }
 
 // InitMetrics registers a global MeterProvider with both a Prometheus
@@ -244,14 +273,15 @@ func newMeterProvider(ctx context.Context, serviceName string, relayCapable bool
 	if serviceName == "" {
 		return nil, fmt.Errorf("serviceName is required")
 	}
-	expOpts := []otlpmetricgrpc.Option{
-		// GKE managed metrics doesn't support validating the TLS certs of the collector.
-		otlpmetricgrpc.WithInsecure(),
-	}
+	var expOpts []otlpmetricgrpc.Option
+	transport := slog.String("transport", "caller-provided connection")
 	if conn != nil {
-		// WithGRPCConn takes precedence over endpoint/credential options, so
-		// WithInsecure above is inert on this path.
+		// WithGRPCConn takes precedence over endpoint and credential options: the
+		// caller's connection decides the transport.
 		expOpts = append(expOpts, otlpmetricgrpc.WithGRPCConn(conn))
+	} else {
+		expOpts = append(expOpts, exporterTransportOptions(otlpmetricgrpc.WithInsecure)...)
+		transport = slog.Any("transport", warnMisconfigured(ctx, otlpenv.Resolve(otlpenv.Metrics)))
 	}
 	otlpExporter, err := otlpmetricgrpc.New(ctx, expOpts...)
 	if err != nil {
@@ -274,6 +304,7 @@ func newMeterProvider(ctx context.Context, serviceName string, relayCapable bool
 	}
 	mp := sdkmetric.NewMeterProvider(opts...)
 	otel.SetMeterProvider(mp)
+	slog.InfoContext(ctx, "Metrics initialized", transport)
 	return mp, nil
 }
 

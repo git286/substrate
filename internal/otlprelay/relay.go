@@ -64,7 +64,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -74,6 +73,8 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+
+	"github.com/agent-substrate/substrate/internal/otlpenv"
 )
 
 const (
@@ -386,10 +387,16 @@ func NewServer(ctx context.Context, sockPath string) (*Server, error) {
 		return nil, err
 	}
 
+	transport, err := upstreamTransport()
+	if err != nil {
+		return nil, err
+	}
+	creds, err := transport.Credentials()
+	if err != nil {
+		return nil, err
+	}
 	dialOpts := []grpc.DialOption{
-		// Plaintext by design today; TLS support for the upstream leg will be added
-		// in tandem with #741.
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 	}
 	if comp == "gzip" {
 		dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(grpc.UseCompressor(gzip.Name)))
@@ -421,6 +428,7 @@ func NewServer(ctx context.Context, sockPath string) (*Server, error) {
 	// Header names only: the values are credentials.
 	slog.InfoContext(ctx, "OTLP relay forwarding to collector",
 		slog.String("collector", target),
+		slog.Any("transport", transport),
 		slog.String("compression", comp),
 		slog.Any("traceHeaders", headerNames(traceHeaders)),
 		slog.Any("metricHeaders", headerNames(metricHeaders)))
@@ -545,12 +553,32 @@ func upstreamTarget() (string, error) {
 	return normalizeEndpoint(resolved)
 }
 
+// upstreamTransport resolves whether the relay's connection to the collector is
+// plaintext or TLS, and with which certificates, from the same variables the
+// SDK exporters read, so ateom telemetry crossing the relay gets the transport
+// atelet's own telemetry gets.
+//
+// As with the endpoint and the compression, the signal-specific variables must
+// agree: there is one connection for both signals.
+func upstreamTransport() (otlpenv.Transport, error) {
+	traces := otlpenv.Resolve(otlpenv.Traces)
+	metrics := otlpenv.Resolve(otlpenv.Metrics)
+	if traces.Insecure != metrics.Insecure ||
+		traces.CAFile != metrics.CAFile ||
+		traces.ClientCertFile != metrics.ClientCertFile ||
+		traces.ClientKeyFile != metrics.ClientKeyFile {
+		return otlpenv.Transport{}, fmt.Errorf("signal-specific TLS settings conflict (traces: %s; metrics: %s); the relay carries both signals over one connection",
+			traces.Reason, metrics.Reason)
+	}
+	return traces, nil
+}
+
 // normalizeEndpoint accepts both a bare "host:port" and the URL form the OTLP
 // environment variables carry, and returns the host:port grpc.NewClient dials.
 //
-// https is rejected rather than downgraded: the relay dials with insecure
-// credentials, so honoring it would ship telemetry in plaintext to an endpoint
-// that asked for TLS.
+// The scheme is not part of the dial target; it decides the transport instead,
+// see upstreamTransport. A bare host:port therefore means TLS, as it does for
+// the SDK exporters, unless OTEL_EXPORTER_OTLP_INSECURE says otherwise.
 func normalizeEndpoint(addr string) (string, error) {
 	hostport := addr
 	if strings.Contains(addr, "://") {
@@ -559,11 +587,9 @@ func normalizeEndpoint(addr string) (string, error) {
 			return "", fmt.Errorf("parse OTLP collector endpoint %q: %w", addr, err)
 		}
 		switch u.Scheme {
-		case "http":
-		case "https":
-			return "", fmt.Errorf("OTLP collector endpoint %q uses https, which the relay does not support: it forwards over an insecure gRPC connection. Point it at an http:// endpoint", addr)
+		case "http", "https":
 		default:
-			return "", fmt.Errorf("OTLP collector endpoint %q has unsupported scheme %q, want http", addr, u.Scheme)
+			return "", fmt.Errorf("OTLP collector endpoint %q has unsupported scheme %q, want http or https", addr, u.Scheme)
 		}
 		hostport = u.Host
 	}

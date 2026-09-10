@@ -17,10 +17,19 @@ package otlprelay
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io/fs"
 	"log/slog"
+	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +41,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
@@ -88,14 +98,14 @@ func (m *metricsSink) Export(ctx context.Context, req *colmetricspb.ExportMetric
 
 // startFakeCollector serves the OTLP collector services on a loopback TCP port
 // (the shape the relay forwards to) and returns the sink and its host:port.
-func startFakeCollector(t *testing.T) (*fakeCollector, string) {
+func startFakeCollector(t *testing.T, opts ...grpc.ServerOption) (*fakeCollector, string) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	sink := &fakeCollector{got: make(chan struct{}, 8)}
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(opts...)
 	coltracepb.RegisterTraceServiceServer(srv, sink)
 	colmetricspb.RegisterMetricsServiceServer(srv, &metricsSink{parent: sink})
 	go func() { _ = srv.Serve(lis) }()
@@ -106,7 +116,7 @@ func startFakeCollector(t *testing.T) (*fakeCollector, string) {
 // startRelay brings up a relay on a socket in a temp dir, wired to collector.
 func startRelay(t *testing.T, collector string) string {
 	t.Helper()
-	t.Setenv(endpointEnv, collector)
+	t.Setenv(endpointEnv, "http://"+collector)
 
 	// Short filename: a unix socket path is capped at ~104 bytes and the test
 	// temp dir already eats most of that on darwin.
@@ -253,7 +263,7 @@ func TestRelayForwardsMetrics(t *testing.T) {
 // every ateom on the node believe a relay is there.
 func TestStopRemovesSocket(t *testing.T) {
 	_, collector := startFakeCollector(t)
-	t.Setenv(endpointEnv, collector)
+	t.Setenv(endpointEnv, "http://"+collector)
 
 	sock := filepath.Join(t.TempDir(), "r.sock")
 	relay, err := NewServer(context.Background(), sock)
@@ -274,7 +284,7 @@ func TestStopRemovesSocket(t *testing.T) {
 // the socket file survives the process, and Listen would refuse to reuse it.
 func TestServeReplacesStaleSocket(t *testing.T) {
 	_, collector := startFakeCollector(t)
-	t.Setenv(endpointEnv, collector)
+	t.Setenv(endpointEnv, "http://"+collector)
 
 	sock := filepath.Join(t.TempDir(), "r.sock")
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
@@ -534,7 +544,7 @@ func TestNewServerRejectsRelativeSocketPath(t *testing.T) {
 // value naming the directory must fail rather than empty it.
 func TestServeLeavesAPopulatedDirectoryAlone(t *testing.T) {
 	_, collector := startFakeCollector(t)
-	t.Setenv(endpointEnv, collector)
+	t.Setenv(endpointEnv, "http://"+collector)
 
 	dir := filepath.Join(t.TempDir(), "basepath")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -572,7 +582,7 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{name: "http url without port", in: "http://otel-collector", want: "otel-collector:" + otlpDefaultPort},
 		{name: "ipv6 literal", in: "[::1]:4317", want: "[::1]:4317"},
 		{name: "ipv6 literal without port", in: "[::1]", want: "[::1]:" + otlpDefaultPort},
-		{name: "https rejected", in: "https://otel-collector:4317", wantErr: "https"},
+		{name: "https url", in: "https://otel-collector:4317", want: "otel-collector:4317"},
 		{name: "unknown scheme rejected", in: "grpc://otel-collector:4317", wantErr: "unsupported scheme"},
 		{name: "empty host rejected", in: "http://:4317", wantErr: "names no host"},
 	} {
@@ -845,7 +855,7 @@ func TestUpstreamHeadersSignalOverride(t *testing.T) {
 // per-export failure once the socket is already live.
 func TestNewServerRejectsUnparseableHeaders(t *testing.T) {
 	_, collector := startFakeCollector(t)
-	t.Setenv(endpointEnv, collector)
+	t.Setenv(endpointEnv, "http://"+collector)
 	t.Setenv(headersEnv, "not-a-pair")
 
 	relay, err := NewServer(context.Background(), filepath.Join(t.TempDir(), "r.sock"))
@@ -867,5 +877,151 @@ func TestSocketPermissions(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("socket permissions = %04o, want 0600", perm)
+	}
+}
+
+// selfSignedServerCert issues a certificate for 127.0.0.1 and writes its PEM to
+// a file, so the relay can be told to trust it through the CA variable.
+func selfSignedServerCert(t *testing.T) (tls.Certificate, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "fake collector"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IPAddresses:           []net.IP{netip.MustParseAddr("127.0.0.1").AsSlice()},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, caFile
+}
+
+// TestRelayForwardsOverTLS: an https endpoint plus a CA bundle in the standard
+// variable gives the relay a verified TLS connection to the collector, the
+// same as the SDK exporters beside it would get.
+func TestRelayForwardsOverTLS(t *testing.T) {
+	cert, caFile := selfSignedServerCert(t)
+	sink, collector := startFakeCollector(t, grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})))
+	t.Setenv("OTEL_EXPORTER_OTLP_CERTIFICATE", caFile)
+	t.Setenv(endpointEnv, "https://"+collector)
+
+	sock := filepath.Join(t.TempDir(), "r.sock")
+	relay, err := NewServer(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- relay.Serve(context.Background()) }()
+	t.Cleanup(relay.Stop)
+	waitForSocket(t, sock, serveErr)
+
+	conn, err := Dial(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{Resource: serviceResource("ateom-gvisor")}},
+	}
+	if _, err := coltracepb.NewTraceServiceClient(conn).Export(context.Background(), req); err != nil {
+		t.Fatalf("Export through the relay over TLS: %v", err)
+	}
+	select {
+	case <-sink.got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("collector never received the export over TLS")
+	}
+}
+
+// TestRelayPlaintextToTLSFails: with the scheme saying plaintext,
+// the relay must not reach a TLS collector; the export fails instead of the
+// data going out on a connection the collector did not ask for.
+func TestRelayPlaintextToTLSFails(t *testing.T) {
+	cert, _ := selfSignedServerCert(t)
+	_, collector := startFakeCollector(t, grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})))
+	sock := startRelay(t, collector) // sets http://, plaintext
+
+	conn, err := Dial(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{Resource: serviceResource("ateom-gvisor")}},
+	}
+	if _, err := coltracepb.NewTraceServiceClient(conn).Export(ctx, req); err == nil {
+		t.Fatal("plaintext export to a TLS collector succeeded, want a failure")
+	}
+}
+
+func TestUpstreamTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		env          map[string]string
+		wantInsecure bool
+		wantErr      string
+	}{
+		{name: "http is plaintext", env: map[string]string{endpointEnv: "http://c:4317"}, wantInsecure: true},
+		{name: "https is TLS", env: map[string]string{endpointEnv: "https://c:4317"}},
+		{name: "bare host is TLS", env: map[string]string{endpointEnv: "c:4317"}},
+		{name: "INSECURE overrides bare host", env: map[string]string{endpointEnv: "c:4317", "OTEL_EXPORTER_OTLP_INSECURE": "true"}, wantInsecure: true},
+		{
+			name:    "signals disagreeing on TLS are refused",
+			env:     map[string]string{endpointEnv: "https://c:4317", "OTEL_EXPORTER_OTLP_METRICS_INSECURE": "true"},
+			wantErr: "conflict",
+		},
+		{
+			name:    "signals disagreeing on the CA bundle are refused",
+			env:     map[string]string{endpointEnv: "https://c:4317", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE": "/a.pem", "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE": "/b.pem"},
+			wantErr: "conflict",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, n := range []string{
+				endpointEnv, tracesEndpointEnv, metricsEndpointEnv,
+				"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_TRACES_INSECURE", "OTEL_EXPORTER_OTLP_METRICS_INSECURE",
+				"OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE", "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE",
+			} {
+				t.Setenv(n, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			got, err := upstreamTransport()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("upstreamTransport() error = %v, want it to mention %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("upstreamTransport(): %v", err)
+			}
+			if got.Insecure != tc.wantInsecure {
+				t.Errorf("upstreamTransport().Insecure = %v, want %v (%s)", got.Insecure, tc.wantInsecure, got.Reason)
+			}
+		})
 	}
 }

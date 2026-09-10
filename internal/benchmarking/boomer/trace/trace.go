@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/agent-substrate/substrate/internal/otlpenv"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -63,7 +64,9 @@ func (u *UpdatableSampler) Description() string {
 
 // Init registers a global TracerProvider with the given sampler and the
 // W3C TraceContext propagator. The OTLP gRPC exporter honors
-// OTEL_EXPORTER_OTLP_ENDPOINT.
+// OTEL_EXPORTER_OTLP_ENDPOINT, including its scheme and the TLS variables;
+// only a worker with no OTLP variable at all is pinned to plaintext, the same
+// rule serverboot applies.
 func Init(ctx context.Context, serviceName string, sampler sdktrace.Sampler) (*sdktrace.TracerProvider, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("serviceName is required")
@@ -86,10 +89,15 @@ func Init(ctx context.Context, serviceName string, sampler sdktrace.Sampler) (*s
 		return nil, fmt.Errorf("create resource: %w", err)
 	}
 
-	exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+	var expOpts []otlptracegrpc.Option
+	if !otlpenv.Configured() {
+		expOpts = append(expOpts, otlptracegrpc.WithInsecure())
+	}
+	exporter, err := otlptracegrpc.New(ctx, expOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create OTLP exporter: %w", err)
 	}
+	slog.InfoContext(ctx, "Tracing initialized", slog.Any("transport", otlpenv.Resolve(otlpenv.Traces)))
 
 	// Route OTel SDK errors (export failures, queue drops) into slog so they
 	// land in boomer-worker's stdout — runner.py pumps that into logs.txt.

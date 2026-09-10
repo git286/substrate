@@ -470,14 +470,37 @@ These are properties of Substrate's current exporter setup
 (`internal/serverboot/serverboot.go`), not of your collector. Tracked in
 [#563](https://github.com/agent-substrate/substrate/issues/563).
 
-**TLS is not supported.** The exporters are constructed with
-`otlptracegrpc.WithInsecure()`, which overrides scheme inference, so setting
-`OTEL_EXPORTER_OTLP_ENDPOINT=https://…` does **not** produce a TLS
-connection — it silently stays plaintext. Keep the collector in-cluster and
-let it own the authenticated hop to your backend.
+**TLS follows the endpoint's scheme and the standard variables.** An
+`https://` endpoint gets a TLS connection verified against the system roots,
+or against the bundle named by `OTEL_EXPORTER_OTLP_CERTIFICATE`;
+`OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` and `OTEL_EXPORTER_OTLP_CLIENT_KEY`
+add a client certificate for mTLS; `OTEL_EXPORTER_OTLP_INSECURE` overrides
+the scheme either way; and setting any certificate variable makes the SDK use
+TLS regardless of the scheme and of `OTEL_EXPORTER_OTLP_INSECURE`. The
+signal-specific `_TRACES_` and `_METRICS_` variants apply as usual. `atelet`'s relay dials the collector with the same
+rules, so ateom telemetry crossing it gets the same transport as `atelet`'s
+own, with one restriction: the relay carries both signals over one
+connection, so the traces and metrics variables must agree on TLS or the
+relay refuses to start and ateoms export directly. Every component logs the
+resolved transport at startup under `transport` on its "Tracing initialized"
+and "Metrics initialized" lines.
 
-TODO: align this with the pod-certificate mTLS the other in-cluster hops
-already use.
+Two consequences of following the SDK. An endpoint with **no scheme** does
+not work: Go's URL parser reads `collector:4317` as scheme `collector` with
+an empty host, so the SDK exporters dial nothing, over TLS, and every export
+fails. Always write the scheme, `http://collector:4317` for a plaintext
+collector. Startup logs an "OTLP exporter misconfigured" warning for this
+case. And a process with **no `OTEL_EXPORTER_OTLP_*` variable at all**
+keeps the plaintext default it always had, because the SDK would otherwise
+dial `localhost:4317` over TLS, which a collector started for local
+development does not speak.
+
+The GKE managed collector has no TLS receiver. An `https://` endpoint toward
+it fails every handshake and exports nothing; startup logs an "OTLP exporter
+misconfigured" warning naming the case. Keep `http://` for the managed
+collector, or bring your own collector for TLS. Substrate does not wire its
+pod certificates into the exporters; point the TLS variables at whatever your
+collector trusts.
 
 **The protocol is fixed to gRPC.** `otlptracegrpc` and `otlpmetricgrpc` are
 compiled in, so `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` is ignored. Your

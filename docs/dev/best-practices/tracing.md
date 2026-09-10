@@ -46,7 +46,7 @@ defer serverboot.ShutdownProvider("TracerProvider", tp.Shutdown)
 
 Note the following important features:
 
-* We are not validating the TLS certs of the collector
+* The exporter follows the OTLP endpoint's scheme: `https://` is TLS, `http://` is plaintext, and the standard `OTEL_EXPORTER_OTLP_CERTIFICATE` / `_CLIENT_CERTIFICATE` / `_CLIENT_KEY` / `_INSECURE` variables apply. With no OTLP variable set at all the exporter stays plaintext to the SDK default `localhost:4317`
 * We provide a service name to exporter to identify which process is emitting the spans
 * Every component samples by default at a per-component ratio (see below); a client that arrives with a sampled trace context is always traced end to end
   * For production, we will want to gate who/how client-forced tracing can be enabled for security purposes

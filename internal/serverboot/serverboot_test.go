@@ -17,7 +17,9 @@ package serverboot
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -331,5 +333,134 @@ func TestSetLogLevel(t *testing.T) {
 	}
 	if got := logLevel.Level(); got != slog.LevelWarn {
 		t.Errorf("SetLogLevel(\"\") changed the level to %v", got)
+	}
+}
+
+// firstByteServer accepts one TCP connection and reports its first byte: 0x16
+// opens a TLS handshake, 'P' opens the plaintext HTTP/2 preface.
+func firstByteServer(t *testing.T) (addr string, first <-chan byte) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ch := make(chan byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, buf); err == nil {
+			ch <- buf[0]
+		}
+	}()
+	return ln.Addr().String(), ch
+}
+
+func clearOTLPEnv(t *testing.T) {
+	t.Helper()
+	for _, n := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_TRACES_INSECURE", "OTEL_EXPORTER_OTLP_METRICS_INSECURE",
+		"OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", "OTEL_EXPORTER_OTLP_CLIENT_KEY",
+	} {
+		t.Setenv(n, "")
+	}
+}
+
+// TestTraceExporterFollowsEndpointScheme drives a real exporter at a listener
+// that only looks at the first byte: an https:// endpoint must open a TLS
+// handshake and an http:// endpoint must not. The exporter used to pin
+// plaintext regardless of the scheme.
+func TestTraceExporterFollowsEndpointScheme(t *testing.T) {
+	for _, tc := range []struct {
+		scheme string
+		want   byte
+	}{
+		{scheme: "https", want: 0x16},
+		{scheme: "http", want: 'P'},
+	} {
+		t.Run(tc.scheme, func(t *testing.T) {
+			clearOTLPEnv(t)
+			addr, first := firstByteServer(t)
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tc.scheme+"://"+addr)
+
+			tp, err := InitTracing(context.Background(), TracingOptions{
+				ServiceName: "test-scheme",
+				Sampling:    ParentRatioSampling(1),
+			})
+			if err != nil {
+				t.Fatalf("InitTracing: %v", err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = tp.Shutdown(ctx)
+			})
+			_, span := tp.Tracer("test").Start(context.Background(), "probe")
+			span.End()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = tp.ForceFlush(ctx) // fails either way: the listener never answers
+
+			select {
+			case got := <-first:
+				if got != tc.want {
+					t.Errorf("first byte on the wire = %#x, want %#x for an %s:// endpoint", got, tc.want, tc.scheme)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the exporter never connected")
+			}
+		})
+	}
+}
+
+// TestMetricExporterFollowsEndpointScheme is the metrics counterpart.
+func TestMetricExporterFollowsEndpointScheme(t *testing.T) {
+	clearOTLPEnv(t)
+	addr, first := firstByteServer(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://"+addr)
+
+	mp, err := InitMetricsPushOnly(context.Background(), "test-scheme")
+	if err != nil {
+		t.Fatalf("InitMetricsPushOnly: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = mp.Shutdown(ctx)
+	})
+	ctr, err := mp.Meter("test").Int64Counter("ate.test.scheme.count")
+	if err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	ctr.Add(context.Background(), 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = mp.ForceFlush(ctx)
+
+	select {
+	case got := <-first:
+		if got != 0x16 {
+			t.Errorf("first byte on the wire = %#x, want a TLS handshake (0x16) for an https:// endpoint", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exporter never connected")
+	}
+}
+
+func TestExporterTransportOptions(t *testing.T) {
+	marker := func() string { return "insecure" }
+	clearOTLPEnv(t)
+	if got := exporterTransportOptions(marker); len(got) != 1 {
+		t.Errorf("exporterTransportOptions() with no OTLP variable = %v, want the plaintext option", got)
+	}
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector:4317")
+	if got := exporterTransportOptions(marker); len(got) != 0 {
+		t.Errorf("exporterTransportOptions() with an endpoint set = %v, want none so the SDK decides", got)
 	}
 }

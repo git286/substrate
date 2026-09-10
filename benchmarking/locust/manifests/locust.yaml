@@ -131,7 +131,7 @@ spec:
         - "--user-class=${BENCHMARK_USER_CLASS}"
         env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317
+          value: http://opentelemetry-collector.gke-managed-otel.svc.cluster.local:4317
         ports:
         - name: boomer-prom
           containerPort: 8001
