@@ -19,11 +19,13 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
 const (
@@ -132,4 +134,80 @@ func TestHandleUngroupedKeepsTraceFieldsTopLevel(t *testing.T) {
 	if rec[ateattr.LogTraceIDField] != testTraceID {
 		t.Errorf("%s = %v, want %q at the top level, got record %v", ateattr.LogTraceIDField, rec[ateattr.LogTraceIDField], testTraceID, rec)
 	}
+}
+
+// tokenValuer stands in for a type that implements slog.LogValuer and
+// resolves to a proto; the handler must resolve it before deciding.
+type tokenValuer struct {
+	m *ateapipb.MintActorJWTResponse
+}
+
+func (v tokenValuer) LogValue() slog.Value { return slog.AnyValue(v.m) }
+
+func TestHandleRedactsProtoAttrsAnywhereInTheRecord(t *testing.T) {
+	const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY3RvciJ9.c2lnbmF0dXJl"
+	resp := &ateapipb.MintActorJWTResponse{ActorJwt: token}
+	ref := &ateapipb.ObjectRef{Atespace: "ate-demo-sandbox", Name: "agent"}
+	tpl := &ateapipb.ActorTemplate{Containers: []*ateapipb.Container{{
+		Name: "c", Env: []*ateapipb.EnvVar{{Name: "API_KEY", Value: "sk-secret"}},
+	}}}
+
+	var buf bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&buf, nil)))
+
+	// Direct attr, attr inside a group, LogValuer resolving to a proto, and a
+	// pre-bound attr via With (WithAttrs), plus clean values that must survive.
+	logger.With(slog.Any("bound", tpl)).InfoContext(context.Background(), "test",
+		slog.Any("resp", resp),
+		slog.Group("nested", slog.String("plain", "keep"), slog.Any("inner", resp)),
+		slog.Any("valuer", tokenValuer{resp}),
+		slog.Any("actor", ref),
+		slog.String("host", "example.com"),
+		slog.Int("n", 3),
+	)
+	got := buf.String()
+
+	for _, leak := range []string{token, "sk-secret"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("log contains %q: %s", leak, got)
+		}
+	}
+	for _, want := range []string{
+		`"resp":{"actor_jwt":"[REDACTED]"}`,
+		`"nested":{"plain":"keep","inner":{"actor_jwt":"[REDACTED]"}}`,
+		`"valuer":{"actor_jwt":"[REDACTED]"}`,
+		`"bound":{"containers":[{"name":"c","env":[{"name":"API_KEY","value":"[REDACTED]"}]}]}`,
+		`"actor":{"atespace":"ate-demo-sandbox","name":"agent"}`,
+		`"host":"example.com"`,
+		`"n":3`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log missing %s\n got: %s", want, got)
+		}
+	}
+	// Originals are untouched: the caller still holds the real values.
+	if resp.GetActorJwt() != token || tpl.GetContainers()[0].GetEnv()[0].GetValue() != "sk-secret" {
+		t.Fatal("handler mutated the logged message")
+	}
+}
+
+func TestHandleLeavesRecordsWithoutProtosAlone(t *testing.T) {
+	// Same record through the bare JSON handler and through ours must match
+	// byte for byte (no span in ctx, so no trace fields are added).
+	var plainBuf, oursBuf bytes.Buffer
+	plain := slog.New(slog.NewJSONHandler(&plainBuf, &slog.HandlerOptions{ReplaceAttr: dropTime}))
+	ours := slog.New(NewHandler(slog.NewJSONHandler(&oursBuf, &slog.HandlerOptions{ReplaceAttr: dropTime})))
+	for _, l := range []*slog.Logger{plain, ours} {
+		l.Info("x", slog.String("a", "b"), slog.Int("n", 1), slog.Any("nilproto", (*ateapipb.ObjectRef)(nil)), slog.Any("m", map[string]int{"k": 1}))
+	}
+	if plainBuf.String() != oursBuf.String() {
+		t.Fatalf("records differ:\n plain: %s\n ours:  %s", plainBuf.String(), oursBuf.String())
+	}
+}
+
+func dropTime(_ []string, a slog.Attr) slog.Attr {
+	if a.Key == slog.TimeKey {
+		return slog.Attr{}
+	}
+	return a
 }

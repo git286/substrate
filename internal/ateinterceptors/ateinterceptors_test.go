@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/contextlogging"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/protoredact"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -355,6 +356,9 @@ func TestMaxDeadlineUnaryInterceptor_ShorterDeadlineIsPreserved(t *testing.T) {
 	}
 }
 
+// captureDefaultLog installs the handler stack the servers run with
+// (serverboot.InitLogger: contextlogging over the JSON handler), since the
+// interceptor relies on that handler for redaction.
 func captureDefaultLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var log bytes.Buffer
@@ -362,7 +366,7 @@ func captureDefaultLog(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() {
 		slog.SetDefault(origLogger)
 	})
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&log, nil)))
+	slog.SetDefault(slog.New(contextlogging.NewHandler(slog.NewJSONHandler(&log, nil))))
 	return &log
 }
 
