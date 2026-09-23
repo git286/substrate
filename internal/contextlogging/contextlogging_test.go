@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -210,4 +211,47 @@ func dropTime(_ []string, a slog.Attr) slog.Attr {
 		return slog.Attr{}
 	}
 	return a
+}
+
+// BenchmarkHandle measures the cost the shared handler adds per log line for
+// the three shapes that matter: no proto at all, a proto whose type has no
+// debug_redact field (returned without a copy), and one that has.
+func BenchmarkHandle(b *testing.B) {
+	listResp := &ateapipb.ListActorsResponse{}
+	for i := 0; i < 50; i++ {
+		listResp.Actors = append(listResp.Actors, &ateapipb.Actor{
+			Metadata:      &ateapipb.ResourceMetadata{Atespace: "s", Name: "agent", Uid: "86fae7b8-c9b4-479c-b7c8-6ef3ede0ab0b", Version: 1},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "s", Name: "tpl"},
+		})
+	}
+	tpl := &ateapipb.ActorTemplate{Containers: []*ateapipb.Container{{Name: "c"}}}
+	for i := 0; i < 32; i++ {
+		tpl.Containers[0].Env = append(tpl.Containers[0].Env, &ateapipb.EnvVar{Name: "VAR", Value: "some-fairly-long-value-1234567890"})
+	}
+	cases := []struct {
+		name  string
+		attrs []slog.Attr
+	}{
+		{"no_proto", []slog.Attr{slog.String("host", "example.com"), slog.String("leg", "mitm"), slog.Int("n", 3)}},
+		{"clean_objectref", []slog.Attr{slog.Any("actor", &ateapipb.ObjectRef{Atespace: "s", Name: "agent"})}},
+		{"clean_listactors_50", []slog.Attr{slog.Any("resp", listResp)}},
+		{"sensitive_template_32env", []slog.Attr{slog.Any("resp", tpl)}},
+	}
+	for _, tc := range cases {
+		for _, h := range []struct {
+			name  string
+			build func() slog.Handler
+		}{
+			{"plain_json", func() slog.Handler { return slog.NewJSONHandler(io.Discard, nil) }},
+			{"contextlogging", func() slog.Handler { return NewHandler(slog.NewJSONHandler(io.Discard, nil)) }},
+		} {
+			b.Run(tc.name+"/"+h.name, func(b *testing.B) {
+				l := slog.New(h.build())
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					l.LogAttrs(context.Background(), slog.LevelInfo, "x", tc.attrs...)
+				}
+			})
+		}
+	}
 }

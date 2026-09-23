@@ -268,3 +268,85 @@ func TestForLogPassesThroughNonProtoValues(t *testing.T) {
 		t.Errorf("typed nil: got %#v", got)
 	}
 }
+
+func TestCloneReturnsCleanMessagesWithoutCopying(t *testing.T) {
+	// Types with no path to a debug_redact field come back as the same
+	// pointer: nothing to mask, nothing to copy.
+	for _, m := range []proto.Message{
+		&ateapipb.ListActorsResponse{Actors: []*ateapipb.Actor{{Metadata: &ateapipb.ResourceMetadata{Name: "a"}}}},
+		&ateapipb.ObjectRef{Atespace: "s", Name: "n"},
+		&ateapipb.Worker{},
+	} {
+		if got := protoredact.Clone(m); got != m {
+			t.Errorf("%T: expected the same message back, got a copy", m)
+		}
+		if protoredact.HasRedactedFields(m.ProtoReflect().Descriptor()) {
+			t.Errorf("%T: HasRedactedFields should be false", m)
+		}
+	}
+	// Types that can reach one are copied, and the copy is masked.
+	for _, m := range []proto.Message{
+		&ateapipb.MintActorJWTResponse{ActorJwt: "t"},
+		&ateapipb.ActorTemplate{Containers: []*ateapipb.Container{{Env: []*ateapipb.EnvVar{{Name: "K", Value: "v"}}}}},
+		&ateletpb.RunRequest{Spec: &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Env: []*ateletpb.EnvEntry{{Name: "K", Value: "v"}}}}}},
+	} {
+		got := protoredact.Clone(m)
+		if got == m {
+			t.Errorf("%T: expected a copy", m)
+		}
+		if !protoredact.HasRedactedFields(m.ProtoReflect().Descriptor()) {
+			t.Errorf("%T: HasRedactedFields should be true", m)
+		}
+	}
+	if got := protoredact.Clone(nil); got != nil {
+		t.Errorf("Clone(nil) = %v", got)
+	}
+}
+
+func TestHasRedactedFieldsIsMemoizedAndHandlesRecursiveSchemas(t *testing.T) {
+	// A self-referential message with a labeled field: Node { secret; children: repeated Node }.
+	redact := &descriptorpb.FieldOptions{DebugRedact: proto.Bool(true)}
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name: proto.String("recursive.proto"), Package: proto.String("recursivetest"), Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: proto.String("Node"), Field: []*descriptorpb.FieldDescriptorProto{
+				{Name: proto.String("secret"), Number: proto.Int32(1), Type: descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(), Options: redact},
+				{Name: proto.String("children"), Number: proto.Int32(2), Type: descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(), TypeName: proto.String(".recursivetest.Node")},
+			}},
+			// A self-referential message with nothing labeled: Tree { children: repeated Tree }.
+			{Name: proto.String("Tree"), Field: []*descriptorpb.FieldDescriptorProto{
+				{Name: proto.String("children"), Number: proto.Int32(1), Type: descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(), TypeName: proto.String(".recursivetest.Tree")},
+			}},
+		},
+	}
+	fd, err := protodesc.NewFile(fdp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := fd.Messages().ByName("Node")
+	tree := fd.Messages().ByName("Tree")
+	if !protoredact.HasRedactedFields(node) {
+		t.Error("Node should report a redacted field")
+	}
+	if protoredact.HasRedactedFields(tree) {
+		t.Error("Tree should not report a redacted field, and must not loop")
+	}
+	// Second call answers from the cache; same result.
+	if !protoredact.HasRedactedFields(node) || protoredact.HasRedactedFields(tree) {
+		t.Error("memoized answers differ from the first")
+	}
+	// Redaction still reaches a secret several levels down a recursive type.
+	leaf := dynamicpb.NewMessage(node)
+	leaf.Set(node.Fields().ByName("secret"), protoreflect.ValueOfString("deep"))
+	mid := dynamicpb.NewMessage(node)
+	mid.Mutable(node.Fields().ByName("children")).List().Append(protoreflect.ValueOfMessage(leaf))
+	root := dynamicpb.NewMessage(node)
+	root.Mutable(node.Fields().ByName("children")).List().Append(protoreflect.ValueOfMessage(mid))
+	protoredact.Redact(root)
+	got := root.Get(node.Fields().ByName("children")).List().Get(0).Message().
+		Get(node.Fields().ByName("children")).List().Get(0).Message().
+		Get(node.Fields().ByName("secret")).String()
+	if got != protoredact.Placeholder {
+		t.Errorf("deep secret = %q", got)
+	}
+}

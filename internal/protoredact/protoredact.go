@@ -20,6 +20,8 @@
 package protoredact
 
 import (
+	"sync"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -41,19 +43,58 @@ func ForLog(v any) any {
 	return Clone(msg)
 }
 
-// Clone returns a deep copy of m with every debug_redact field masked. m is
-// not modified.
+// Clone returns m with every debug_redact field masked, without modifying m.
 //
-// TODO: memoize, per message descriptor, whether the type can reach a
-// debug_redact field at all. Most of our RPC messages cannot (Actor,
-// ListActorsResponse, Worker, ...), and for those the clone and the walk are
-// pure overhead: they could be returned as-is after a cache lookup. The same
-// answer lets Redact skip sub-messages whose type has no redacted fields
-// instead of traversing them. Benchmarks for both are linked from #1743.
+// When m's type cannot reach a debug_redact field, which holds for most of our
+// RPC messages (Actor, ListActorsResponse, Worker, ...), m itself is returned:
+// there is nothing to mask, so nothing to copy. Callers must treat the result
+// as read-only. Otherwise a deep copy is made and masked.
 func Clone(m proto.Message) proto.Message {
+	if m == nil || !HasRedactedFields(m.ProtoReflect().Descriptor()) {
+		return m
+	}
 	clone := proto.Clone(m)
 	Redact(clone.ProtoReflect())
 	return clone
+}
+
+// redactedTypes memoizes HasRedactedFields per message descriptor. The answer
+// depends only on the schema, which is fixed for the life of the process, so
+// it is computed once per type.
+var redactedTypes sync.Map // protoreflect.MessageDescriptor -> bool
+
+// HasRedactedFields reports whether a message of type md can carry a
+// debug_redact field, directly or through any nested message, list element
+// or map value, however deep. The answer is memoized per descriptor.
+func HasRedactedFields(md protoreflect.MessageDescriptor) bool {
+	if v, ok := redactedTypes.Load(md); ok {
+		return v.(bool)
+	}
+	r := hasRedactedFields(md, map[protoreflect.MessageDescriptor]bool{})
+	redactedTypes.Store(md, r)
+	return r
+}
+
+// hasRedactedFields is the uncached walk. seen guards recursive schemas
+// (a message type that contains itself).
+func hasRedactedFields(md protoreflect.MessageDescriptor, seen map[protoreflect.MessageDescriptor]bool) bool {
+	if seen[md] {
+		return false
+	}
+	seen[md] = true
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if IsRedacted(fd) {
+			return true
+		}
+		// fd.Message() is the nested type for message and group fields and
+		// the entry type for maps, whose value field is checked in turn.
+		if sub := fd.Message(); sub != nil && hasRedactedFields(sub, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsRedacted reports whether fd carries [debug_redact = true].
@@ -66,8 +107,12 @@ func IsRedacted(fd protoreflect.FieldDescriptor) bool {
 // debug_redact option, recursing through nested messages, lists and map
 // values. Singular string fields are replaced with Placeholder; any other
 // kind (bytes, repeated, map, message, ...) is cleared, because no honest
-// placeholder exists for them.
+// placeholder exists for them. Sub-messages whose type cannot carry a
+// debug_redact field are not visited.
 func Redact(msg protoreflect.Message) {
+	if !HasRedactedFields(msg.Descriptor()) {
+		return
+	}
 	msg.Range(func(fd protoreflect.FieldDescriptor, value protoreflect.Value) bool {
 		if IsRedacted(fd) {
 			if fd.Kind() == protoreflect.StringKind && !fd.IsList() && !fd.IsMap() {
@@ -81,21 +126,23 @@ func Redact(msg protoreflect.Message) {
 		case fd.IsMap():
 			// A map field reports MessageKind (its entry type) but its value
 			// is a Map, so this case must come before the message case.
-			if fd.MapValue().Kind() == protoreflect.MessageKind {
+			if fd.MapValue().Kind() == protoreflect.MessageKind && HasRedactedFields(fd.MapValue().Message()) {
 				value.Map().Range(func(_ protoreflect.MapKey, mv protoreflect.Value) bool {
 					Redact(mv.Message())
 					return true
 				})
 			}
 		case fd.IsList():
-			if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
+			if (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) && HasRedactedFields(fd.Message()) {
 				list := value.List()
 				for i := 0; i < list.Len(); i++ {
 					Redact(list.Get(i).Message())
 				}
 			}
 		case fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind:
-			Redact(value.Message())
+			if HasRedactedFields(fd.Message()) {
+				Redact(value.Message())
+			}
 		}
 		return true
 	})
