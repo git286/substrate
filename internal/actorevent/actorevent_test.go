@@ -30,6 +30,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
 const (
@@ -53,6 +54,17 @@ func stateChangedAttrs(state string) []slog.Attr {
 	return append(ateattr.ActorLogAttrs(testAttribution()),
 		slog.String(string(ateattr.ActorOperationNameKey), ateattr.OperationResume),
 		slog.String(string(ateattr.ActorStateKey), state))
+}
+
+// placed adds what controlapi appends while the actor holds a worker.
+func placed(attrs []slog.Attr) []slog.Attr {
+	return append(attrs, ateattr.WorkerPlacementLogAttrs(&ateapipb.WorkerAssignment{
+		Worker:          &ateapipb.ObjectRef{Name: "1f0c6d2e-worker-uid"},
+		WorkerNamespace: "ate-system",
+		WorkerPool:      "default",
+		WorkerPod:       "default-7d9f8b6c5-x2k9q",
+		NodeName:        "node-a",
+	})...)
 }
 
 // crashedAttrs mirrors what controlapi.logActorCrashed builds.
@@ -117,14 +129,32 @@ func TestBuildRecord(t *testing.T) {
 		{
 			name:     "state changed",
 			event:    StateChanged,
-			attrs:    stateChangedAttrs(ateattr.ActorStateRunning),
+			attrs:    stateChangedAttrs(ateattr.ActorStateSuspended),
 			wantName: "ate.actor.state_changed",
 			wantBody: "Actor state changed",
 			wantSev:  log.SeverityInfo,
 			wantVals: map[string]string{
-				string(ateattr.ActorStateKey):         ateattr.ActorStateRunning,
+				string(ateattr.ActorStateKey):         ateattr.ActorStateSuspended,
 				string(ateattr.ActorOperationNameKey): ateattr.OperationResume,
 				string(ateattr.ActorUIDKey):           testActorUID,
+			},
+			// A state that holds no worker names none.
+			wantAbsent: StateChanged.Conditional,
+		},
+		{
+			name:     "state changed on a worker names the worker",
+			event:    StateChanged,
+			attrs:    placed(stateChangedAttrs(ateattr.ActorStateRunning)),
+			wantName: "ate.actor.state_changed",
+			wantBody: "Actor state changed",
+			wantSev:  log.SeverityInfo,
+			wantVals: map[string]string{
+				string(ateattr.ActorStateKey):          ateattr.ActorStateRunning,
+				string(ateattr.WorkerPoolNamespaceKey): "ate-system",
+				string(ateattr.WorkerPoolNameKey):      "default",
+				string(ateattr.WorkerNameKey):          "1f0c6d2e-worker-uid",
+				string(ateattr.WorkerPodKey):           "default-7d9f8b6c5-x2k9q",
+				string(ateattr.WorkerNodeKey):          "node-a",
 			},
 		},
 		{
@@ -139,7 +169,7 @@ func TestBuildRecord(t *testing.T) {
 			},
 		},
 		{
-			name:     "crashed",
+			name:     "crashed before reaching a worker names none",
 			event:    Crashed,
 			attrs:    crashedAttrs(),
 			wantName: "ate.actor.crashed",
@@ -147,6 +177,20 @@ func TestBuildRecord(t *testing.T) {
 			wantSev:  log.SeverityError,
 			wantVals: map[string]string{
 				string(ateattr.ActorStateKey): ateattr.ActorStateCrashed,
+			},
+			wantAbsent: Crashed.Conditional,
+		},
+		{
+			name:     "crashed on a worker names the worker it was lost on",
+			event:    Crashed,
+			attrs:    placed(crashedAttrs()),
+			wantName: "ate.actor.crashed",
+			wantBody: "Actor crashed",
+			wantSev:  log.SeverityError,
+			wantVals: map[string]string{
+				string(ateattr.ActorStateKey): ateattr.ActorStateCrashed,
+				string(ateattr.WorkerPodKey):  "default-7d9f8b6c5-x2k9q",
+				string(ateattr.WorkerNodeKey): "node-a",
 			},
 		},
 		{

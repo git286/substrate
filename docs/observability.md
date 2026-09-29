@@ -155,6 +155,8 @@ ateapi's `Actor state changed` is written once per committed actor state transit
 
 `ate.actor.operation.name` says which operation drove the transition, which the state alone does not: an actor reaches `suspended` from a suspend and `paused` from a pause, and the two differ in whether the worker was released.
 
+While the committed state holds a worker, the record also says where: `ate.workerpool.namespace`, `ate.workerpool.name`, `ate.worker.name`, `ate.worker.pod` and `ate.worker.node`, read off the same committed record. A state that holds no worker, such as `suspended` or `paused`, carries none of them, so the example above has none. A worker hosts many actors, so the pod name in a worker's own logs no longer names one actor; the last `state_changed` record per uid is what lists the actors on a pod.
+
 The record goes out after the store commit, never before, and the state is read straight off the committed record rather than named by the caller. Every state commit has a version check too, so if two writers race, the one that lost writes nothing. You will never see a state here that the store did not actually hold.
 
 Creating an actor counts as a change. A new actor is born suspended, so it gets a record saying so, with `ate.actor.operation.name` set to `create`. Otherwise an actor that is created and never resumed would have no record at all, no matter how long you keep your logs.
@@ -169,9 +171,13 @@ Creating an actor counts as a change. A new actor is born suspended, so it gets 
 {"time":"…","level":"ERROR","msg":"Actor crashed",
  "ate.atespace":"ate-demo-counter","ate.actor.name":"counter-1","ate.actor.uid":"8f2a…",
  "ate.template.atespace":"ate-demo-counter","ate.template.name":"counter",
+ "ate.workerpool.namespace":"ate-demo-counter","ate.workerpool.name":"counter",
+ "ate.worker.name":"1f0c6d2e-…","ate.worker.pod":"counter-7d9f8b6c5-x2k9q","ate.worker.node":"gke-…-9x8y",
  "ate.actor.operation.name":"resume","ate.actor.state":"crashed",
  "trace_id":"4bf92f…","span_id":"00f067…","trace_flags":"01"}
 ```
+
+The placement keys are the worker the actor was lost on, as the actor held them before the crash cleared its assignment; the committed `CRASHED` record holds no worker, so this record is the only place that ties the crash to a pod. When a worker pod dies, the `Actor crashed` records with its `ate.worker.pod` are the list of actors it took with it. A crash before the actor reached a worker carries no placement.
 
 The counter carries no actor identity, so this record is the only way to attribute a crash to one agent. The decision-point line that precedes it (`Setting Actor to crashed due to error`) carries only `ate.atespace` and `ate.actor.name`: it is written before the Actor is loaded, so no uid exists yet.
 
@@ -183,8 +189,8 @@ Three `event.name` values, which is the OTLP LogRecord's own field rather than a
 
 | `event.name` | Body | Severity | Attributes |
 |---|---|---|---|
-| `ate.actor.state_changed` | `Actor state changed` | 9 | the five identity keys, `ate.actor.operation.name`, `ate.actor.state` |
-| `ate.actor.crashed` | `Actor crashed` | 17 | the same keys |
+| `ate.actor.state_changed` | `Actor state changed` | 9 | the five identity keys, `ate.actor.operation.name`, `ate.actor.state`, and while the committed state holds a worker its placement: `ate.workerpool.*`, `ate.worker.name`, `ate.worker.pod`, `ate.worker.node` |
+| `ate.actor.crashed` | `Actor crashed` | 17 | the same keys; the placement is the worker the actor was lost on |
 | `ate.actor.usage_sampled` | `Actor usage sampled` | 9 | the five identity keys, `ate.workerpool.*`, `ate.sandbox.class`, `ate.stats.*`, `ate.actor.epoch` |
 
 `ate.actor.usage_sampled` is the ateoms' record: one per actor per sampling period, plus an `initial` and a `final` per activation, told apart by `ate.stats.kind`. Its timestamp is when the measurement was read. Its measurements are named after the `ate.actor.stats.*` instruments and share their units, so `ate.stats.cpu.time` is seconds. They are absent, not zero, while the actor is not measurable, which the record says with `ate.stats.source` unspecified. `ate.stats.cpu.time` restarts at zero with each `ate.actor.epoch`, the unix-nano time the activation began, so a lifetime figure is the sum over epochs of each epoch's highest value; `ate.stats.memory.usage` and `ate.stats.memory.working_set` are absolute, and `ate.stats.memory.peak` is as the source reports it. The same measurements ride `WorkloadStatsSample` on the stats RPCs, with the epoch beside them.

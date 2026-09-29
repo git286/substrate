@@ -79,6 +79,12 @@ func markSkipped(ctx context.Context, reason string) {
 // can be retried. Every state commit carries a version precondition, so a call
 // that returns is the one that made the change.
 //
+// The placement is read off the same committed record. A state that holds a
+// worker names its pool, worker, pod and node; one that holds none, such as
+// suspended or paused, carries no placement key. Thus the last record for an
+// actor also says where it is, and a consumer can list the actors that were on
+// a pod by their last record.
+//
 // Crashes go through logActorCrashed instead, so read the state off
 // ate.actor.state rather than off the message.
 func logActorStateChanged(ctx context.Context, actor *ateapipb.Actor, opName string) {
@@ -93,6 +99,7 @@ func logActorDeleted(ctx context.Context, actor *ateapipb.Actor, opName string) 
 
 func logActorState(ctx context.Context, actor *ateapipb.Actor, opName, state string) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
+	attrs = append(attrs, ateattr.WorkerPlacementLogAttrs(actor.GetStatus().GetWorkerAssignment())...)
 	attrs = append(attrs,
 		slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)),
 		slog.String(string(ateattr.ActorStateKey), state))

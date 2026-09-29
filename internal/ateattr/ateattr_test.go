@@ -158,6 +158,9 @@ func TestKeySpellings(t *testing.T) {
 		{WorkerPoolNamespaceKey, "ate.workerpool.namespace"},
 		{WorkerPoolNameKey, "ate.workerpool.name"},
 		{WorkerStateKey, "ate.worker.state"},
+		{WorkerNameKey, "ate.worker.name"},
+		{WorkerPodKey, "ate.worker.pod"},
+		{WorkerNodeKey, "ate.worker.node"},
 		{SandboxClassKey, "ate.sandbox.class"},
 		{SnapshotKindKey, "ate.snapshot.kind"},
 		{SnapshotScopeKey, "ate.snapshot.scope"},
@@ -565,6 +568,67 @@ func TestWorkerPoolAttributes(t *testing.T) {
 	t.Run("name without a namespace returns neither key", func(t *testing.T) {
 		if got := WorkerPoolAttributes("", "pool-a"); len(got) != 0 {
 			t.Errorf("WorkerPoolAttributes(\"\", \"pool-a\") = %v, want no attributes", got)
+		}
+	})
+}
+
+func TestWorkerPlacementAttributes(t *testing.T) {
+	assignment := &ateapipb.WorkerAssignment{
+		Worker:          &ateapipb.ObjectRef{Name: "1f0c6d2e-worker-uid"},
+		WorkerNamespace: "ate-workers",
+		WorkerPool:      "pool-a",
+		WorkerPod:       "pool-a-7d9f8b6c5-x2k9q",
+		NodeName:        "node-1",
+	}
+
+	t.Run("an assignment names the pool, the worker, its pod and its node", func(t *testing.T) {
+		got := toMap(WorkerPlacementAttributes(assignment))
+		want := map[attribute.Key]any{
+			WorkerPoolNamespaceKey: "ate-workers",
+			WorkerPoolNameKey:      "pool-a",
+			WorkerNameKey:          "1f0c6d2e-worker-uid",
+			WorkerPodKey:           "pool-a-7d9f8b6c5-x2k9q",
+			WorkerNodeKey:          "node-1",
+		}
+		assertAttrs(t, got, want)
+	})
+
+	// An actor that holds no worker names none: a record must not carry an
+	// empty pod that a consumer would then group on.
+	t.Run("no assignment returns no key", func(t *testing.T) {
+		if got := WorkerPlacementAttributes(nil); len(got) != 0 {
+			t.Errorf("WorkerPlacementAttributes(nil) = %v, want no attributes", got)
+		}
+		if got := WorkerPlacementLogAttrs(nil); len(got) != 0 {
+			t.Errorf("WorkerPlacementLogAttrs(nil) = %v, want no attributes", got)
+		}
+	})
+
+	t.Run("a field the assignment lacks is omitted, not emitted empty", func(t *testing.T) {
+		partial := &ateapipb.WorkerAssignment{
+			Worker:    &ateapipb.ObjectRef{Name: "1f0c6d2e-worker-uid"},
+			WorkerPod: "pool-a-7d9f8b6c5-x2k9q",
+		}
+		got := toMap(WorkerPlacementAttributes(partial))
+		want := map[attribute.Key]any{
+			WorkerNameKey: "1f0c6d2e-worker-uid",
+			WorkerPodKey:  "pool-a-7d9f8b6c5-x2k9q",
+		}
+		assertAttrs(t, got, want)
+	})
+
+	// The log and span spellings must agree, or a record and a trace name the
+	// same worker two ways.
+	t.Run("log attrs match span attrs key for key", func(t *testing.T) {
+		span := toMap(WorkerPlacementAttributes(assignment))
+		logAttrs := WorkerPlacementLogAttrs(assignment)
+		if len(logAttrs) != len(span) {
+			t.Fatalf("got %d log attrs, want %d: %v", len(logAttrs), len(span), logAttrs)
+		}
+		for _, a := range logAttrs {
+			if want, ok := span[attribute.Key(a.Key)]; !ok || want.AsString() != a.Value.String() {
+				t.Errorf("log attr %s = %q, span has %v", a.Key, a.Value.String(), want)
+			}
 		}
 	})
 }

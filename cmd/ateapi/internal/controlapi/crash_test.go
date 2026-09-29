@@ -568,6 +568,67 @@ func TestCrashActorReleaseFailureLeavesWorkerReclaimable(t *testing.T) {
 	}
 }
 
+// TestCrashRecordNamesTheWorkerTheActorWasLostOn covers the placement keys on
+// the crash record. The committed CRASHED record holds no worker, so the record
+// is the only thing that ties a crash to the pod; when a pod dies, these
+// records are the list of actors it took with it.
+func TestCrashRecordNamesTheWorkerTheActorWasLostOn(t *testing.T) {
+	ctx := context.Background()
+	records := crashRecords(t)
+
+	st, cleanup := storetest.SetupTestStore(t)
+	defer cleanup()
+
+	actorRef := resources.ActorRef{Atespace: "demo-ns", Name: "counter-actor"}
+	assignment := &ateapipb.WorkerAssignment{
+		Worker:          &ateapipb.ObjectRef{Name: "1f0c6d2e-worker-uid"},
+		WorkerNamespace: "ate-workers",
+		WorkerPool:      "pool-a",
+		WorkerPod:       "pool-a-7d9f8b6c5-x2k9q",
+		NodeName:        "node-1",
+	}
+	storetest.MustCreateActor(t, ctx, st, &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: "demo-ns", Name: "counter-template"},
+		Status: &ateapipb.ActorStatus{
+			State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			WorkerAssignment: assignment,
+		},
+	})
+
+	// The worker is already gone, as it is when a pod dies under its actors.
+	if err := crashActor(ctx, st, actorRef, ateattr.OperationResume, "worker pod went away"); err != nil {
+		t.Fatalf("crashActor: %v", err)
+	}
+	if len(*records) != 1 {
+		t.Fatalf("got %d crash records, want 1", len(*records))
+	}
+
+	got := (*records)[0].attrs
+	want := map[string]string{
+		string(ateattr.WorkerPoolNamespaceKey): "ate-workers",
+		string(ateattr.WorkerPoolNameKey):      "pool-a",
+		string(ateattr.WorkerNameKey):          "1f0c6d2e-worker-uid",
+		string(ateattr.WorkerPodKey):           "pool-a-7d9f8b6c5-x2k9q",
+		string(ateattr.WorkerNodeKey):          "node-1",
+		string(ateattr.ActorStateKey):          ateattr.ActorStateCrashed,
+	}
+	for k, wv := range want {
+		if got[k] != wv {
+			t.Errorf("%s = %q, want %q", k, got[k], wv)
+		}
+	}
+
+	// The record names a worker the committed actor no longer holds.
+	stored, err := st.GetActor(ctx, actorRef)
+	if err != nil {
+		t.Fatalf("GetActor: %v", err)
+	}
+	if stored.GetStatus().GetWorkerAssignment() != nil {
+		t.Errorf("crashed actor still holds %v, want no assignment", stored.GetStatus().GetWorkerAssignment())
+	}
+}
+
 // crashRecords captures the "Actor crashed" records a crash emits, so a test can
 // assert the identity that ate.actor.crashes is barred from carrying. crashActor
 // logs through the slog default, so this swaps it and the caller cannot be parallel.

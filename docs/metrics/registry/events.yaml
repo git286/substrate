@@ -43,6 +43,13 @@ groups:
       a consumer that reads the state off the attribute sees every transition
       and needs no map from a name to a state.
 
+      The record names where the actor is. While the committed state holds a
+      worker, the record carries the pool pair, ate.worker.name, ate.worker.pod
+      and ate.worker.node. A state that holds no worker, such as suspended or
+      paused, carries none of them. Thus the last record for an actor also
+      says where it runs, and the last records of many actors say which of
+      them are on one pod.
+
       Never sample or filter this stream. A consumer takes the last record for
       an actor, thus one dropped record reports a stale state with no sign that
       anything is missing.
@@ -66,6 +73,21 @@ groups:
         requirement_level: required
       - ref: ate.actor.state
         requirement_level: required
+      - ref: ate.workerpool.namespace
+        requirement_level:
+          conditionally_required: The committed state holds a worker.
+      - ref: ate.workerpool.name
+        requirement_level:
+          conditionally_required: The committed state holds a worker.
+      - ref: ate.worker.name
+        requirement_level:
+          conditionally_required: The committed state holds a worker.
+      - ref: ate.worker.pod
+        requirement_level:
+          conditionally_required: The committed state holds a worker.
+      - ref: ate.worker.node
+        requirement_level:
+          conditionally_required: The committed state holds a worker.
 
   - id: event.ate.actor.crashed
     type: event
@@ -79,6 +101,13 @@ groups:
 
       ate.actor.state is always crashed. It is set so a consumer reading the
       state off one attribute reaches crashed without special-casing the name.
+
+      The record names the worker the actor was lost on: the pool pair,
+      ate.worker.name, ate.worker.pod and ate.worker.node as the actor held
+      them before the crash cleared its assignment. A worker holds more than
+      one actor, thus when a pod dies these records, and not the pod's own
+      logs, say which actors it took with it. A crash before the actor
+      reached a worker carries none of them.
     annotations:
       substrate:
         emitted_by: [ateapi]
@@ -99,6 +128,21 @@ groups:
         requirement_level: required
       - ref: ate.actor.state
         requirement_level: required
+      - ref: ate.workerpool.namespace
+        requirement_level:
+          conditionally_required: The actor held a worker when it crashed.
+      - ref: ate.workerpool.name
+        requirement_level:
+          conditionally_required: The actor held a worker when it crashed.
+      - ref: ate.worker.name
+        requirement_level:
+          conditionally_required: The actor held a worker when it crashed.
+      - ref: ate.worker.pod
+        requirement_level:
+          conditionally_required: The actor held a worker when it crashed.
+      - ref: ate.worker.node
+        requirement_level:
+          conditionally_required: The actor held a worker when it crashed.
 
   - id: event.ate.actor.usage_sampled
     type: event

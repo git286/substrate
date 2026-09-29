@@ -85,6 +85,17 @@ var identityKeys = []string{
 	string(ateattr.TemplateNameKey),
 }
 
+// placementKeys is what ateattr.WorkerPlacementLogAttrs writes, in its order.
+// An actor carries them only while it holds a worker, so on the lifecycle
+// events they are conditional.
+var placementKeys = []string{
+	string(ateattr.WorkerPoolNamespaceKey),
+	string(ateattr.WorkerPoolNameKey),
+	string(ateattr.WorkerNameKey),
+	string(ateattr.WorkerPodKey),
+	string(ateattr.WorkerNodeKey),
+}
+
 // Three names. A crash is its own because it has a different severity; there
 // is no name per state, because ate.actor.state already says which transition
 // happened. UsageSampled is the ateoms' measurement record.
@@ -96,6 +107,9 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
+		// Present while the committed state holds a worker; absent once the
+		// actor is suspended, paused or crashed and holds none.
+		Conditional: append([]string{}, placementKeys...),
 	}
 
 	Crashed = Event{
@@ -105,6 +119,9 @@ var (
 		Keys: append(append([]string{}, identityKeys...),
 			string(ateattr.ActorOperationNameKey),
 			string(ateattr.ActorStateKey)),
+		// The worker the actor was lost on. Absent for a crash before the
+		// actor reached one.
+		Conditional: append([]string{}, placementKeys...),
 	}
 
 	UsageSampled = Event{

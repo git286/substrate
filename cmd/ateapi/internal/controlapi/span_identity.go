@@ -30,6 +30,13 @@ func setSpanActorAttributes(ctx context.Context, a *ateapipb.Actor) {
 	trace.SpanFromContext(ctx).SetAttributes(ateattr.ActorAttributes(a)...)
 }
 
+// setSpanWorkerPlacementAttributes annotates the RPC's server span (from ctx)
+// with the worker the actor was placed on, so a trace of a resume names the pod
+// and the node that ran the restore. A no-op for a nil assignment.
+func setSpanWorkerPlacementAttributes(ctx context.Context, a *ateapipb.WorkerAssignment) {
+	trace.SpanFromContext(ctx).SetAttributes(ateattr.WorkerPlacementAttributes(a)...)
+}
+
 // setSpanActorRefAttributes is setSpanActorAttributes for the identity subset known
 // before the Actor record resolves, so a failed lookup still carries who/where.
 func setSpanActorRefAttributes(ctx context.Context, actorRef resources.ActorRef) {

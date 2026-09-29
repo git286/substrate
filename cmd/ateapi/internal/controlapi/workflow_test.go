@@ -197,6 +197,55 @@ func TestActorCreatedRecord(t *testing.T) {
 	}
 }
 
+// TestActorStateRecordCarriesPlacement covers the placement keys. A worker
+// hosts many actors, so the pod name in a worker's logs no longer names one
+// actor; the state record is what ties an actor to the pod and node it is on.
+func TestActorStateRecordCarriesPlacement(t *testing.T) {
+	ctx := context.Background()
+	records := logRecords(t, actorevent.StateChanged.Body)
+
+	persistence := newTestPersistence(t)
+	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+	seedWorkflowActor(t, ctx, persistence, actorRef, "ns", "tmpl1", ateapipb.ActorState_ACTOR_STATE_RUNNING, func(a *ateapipb.Actor) {
+		a.Status.WorkerAssignment = &ateapipb.WorkerAssignment{
+			Worker:          &ateapipb.ObjectRef{Name: "1f0c6d2e-worker-uid"},
+			WorkerNamespace: "ate-workers",
+			WorkerPool:      "pool-a",
+			WorkerPod:       "pool-a-7d9f8b6c5-x2k9q",
+			NodeName:        "node-1",
+		}
+	})
+	stored, err := persistence.GetActor(ctx, actorRef)
+	if err != nil {
+		t.Fatalf("get actor: %v", err)
+	}
+
+	logActorStateChanged(ctx, stored, ateattr.OperationResume)
+
+	if len(*records) != 1 {
+		t.Fatalf("got %d state records, want 1: %v", len(*records), *records)
+	}
+	got := (*records)[0].attrs
+	want := map[string]string{
+		string(ateattr.AtespaceKey):            actorRef.Atespace,
+		string(ateattr.ActorNameKey):           actorRef.Name,
+		string(ateattr.ActorUIDKey):            stored.GetMetadata().GetUid(),
+		string(ateattr.TemplateAtespaceKey):    "ns",
+		string(ateattr.TemplateNameKey):        "tmpl1",
+		string(ateattr.WorkerPoolNamespaceKey): "ate-workers",
+		string(ateattr.WorkerPoolNameKey):      "pool-a",
+		string(ateattr.WorkerNameKey):          "1f0c6d2e-worker-uid",
+		string(ateattr.WorkerPodKey):           "pool-a-7d9f8b6c5-x2k9q",
+		string(ateattr.WorkerNodeKey):          "node-1",
+		string(ateattr.ActorOperationNameKey):  ateattr.OperationResume,
+		string(ateattr.ActorStateKey):          ateattr.ActorStateRunning,
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("state record = %v, want %v", got, want)
+	}
+}
+
 // TestActorDeletedRecord covers the terminal record. Without it "deleting" is
 // the last thing a deleted actor ever reports, and a consumer cannot tell a
 // finished delete from one that is stuck.

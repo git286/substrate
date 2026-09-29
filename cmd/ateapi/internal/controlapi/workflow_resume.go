@@ -121,6 +121,7 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 		return nil, false, err
 	}
 	actor = assigned
+	setSpanWorkerPlacementAttributes(ctx, actor.GetStatus().GetWorkerAssignment())
 	if err = w.ensureVolumesAttached(leaseCtx, actor, worker, actorTemplate); err != nil {
 		return nil, false, err
 	}

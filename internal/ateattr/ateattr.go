@@ -162,6 +162,9 @@ const (
 	WorkerPoolNamespaceKey = attribute.Key("ate.workerpool.namespace")
 	WorkerPoolNameKey      = attribute.Key("ate.workerpool.name")
 	WorkerStateKey         = attribute.Key("ate.worker.state")
+	WorkerNameKey          = attribute.Key("ate.worker.name")
+	WorkerPodKey           = attribute.Key("ate.worker.pod")
+	WorkerNodeKey          = attribute.Key("ate.worker.node")
 	SandboxClassKey        = attribute.Key("ate.sandbox.class")
 	SnapshotKindKey        = attribute.Key("ate.snapshot.kind")
 	SnapshotScopeKey       = attribute.Key("ate.snapshot.scope")
@@ -389,6 +392,47 @@ func WorkerPoolAttributes(namespace, name string) []attribute.KeyValue {
 		WorkerPoolNamespaceKey.String(namespace),
 		WorkerPoolNameKey.String(name),
 	}
+}
+
+// WorkerPlacementAttributes returns where an actor runs, read off the worker
+// assignment it holds: the pool pair, the Worker's name, its pod and its node.
+// A nil assignment returns nil, and a field the assignment does not carry is
+// omitted, so a record for an actor that holds no worker names none rather
+// than an empty one.
+//
+// These keys take one value per worker pod. They go on spans and log records,
+// never on a metric label; ate.worker.state is the one worker key a metric
+// carries.
+func WorkerPlacementAttributes(a *ateapipb.WorkerAssignment) []attribute.KeyValue {
+	if a == nil {
+		return nil
+	}
+	attrs := WorkerPoolAttributes(a.GetWorkerNamespace(), a.GetWorkerPool())
+	for _, kv := range []attribute.KeyValue{
+		WorkerNameKey.String(a.GetWorker().GetName()),
+		WorkerPodKey.String(a.GetWorkerPod()),
+		WorkerNodeKey.String(a.GetNodeName()),
+	} {
+		if kv.Value.AsString() != "" {
+			attrs = append(attrs, kv)
+		}
+	}
+	return attrs
+}
+
+// WorkerPlacementLogAttrs is WorkerPlacementAttributes for a slog record. It
+// agrees with it key for key, so a log record and a span name a worker the
+// same way.
+func WorkerPlacementLogAttrs(a *ateapipb.WorkerAssignment) []slog.Attr {
+	kvs := WorkerPlacementAttributes(a)
+	if len(kvs) == 0 {
+		return nil
+	}
+	attrs := make([]slog.Attr, 0, len(kvs))
+	for _, kv := range kvs {
+		attrs = append(attrs, slog.String(string(kv.Key), kv.Value.AsString()))
+	}
+	return attrs
 }
 
 // ActorRefAttributes returns the subset knowable before the Actor record

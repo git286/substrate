@@ -242,6 +242,28 @@ groups:
               brief: >
                 The scheduler places no actor on the worker. It is not active,
                 or it has not reported an actor capacity yet.
+      - id: ate.worker.name
+        stability: development
+        type: string
+        brief: The name of the Worker resource. It is the UID of the worker pod.
+        note: >
+          Where an actor runs. This key, ate.worker.pod and ate.worker.node go
+          on the actor events and on spans, beside the pool pair. They are not
+          metric labels: each takes one value per worker pod, and a fleet of
+          pods multiplies every series it touches. ate.worker.state is the one
+          worker key a metric carries. A worker holds more than one actor, thus
+          these keys, and not the pod alone, join an actor to its worker.
+        examples: [1f0c6d2e-9a5b-4c3e-8f7a-2b1d4e6f8a9c]
+      - id: ate.worker.pod
+        stability: development
+        type: string
+        brief: The name of the worker pod, in the namespace of its WorkerPool.
+        examples: [counter-7d9f8b6c5-x2k9q]
+      - id: ate.worker.node
+        stability: development
+        type: string
+        brief: The name of the Kubernetes node that runs the worker pod.
+        examples: [gke-ate-dev-default-pool-3f2a1b0c-9x8y]
 
   - id: registry.ate.sandbox
     type: attribute_group

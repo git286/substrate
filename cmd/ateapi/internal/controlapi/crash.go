@@ -128,8 +128,14 @@ func newActorCrash(opName, message string) *ateapipb.ActorCrash {
 // It names ate.actor.state for the same reason ateom's lifecycle records do: a
 // crash is the one transition ateom never observes, so a consumer taking the
 // last state an actor reached has to see this record to reach "crashed" at all.
+//
+// Pass the actor as it was loaded before the crash cleared its assignment. The
+// record then names the worker the actor was lost on, which the committed
+// CRASHED record no longer holds, and a consumer can ask which actors a dead
+// pod took with it.
 func logActorCrashed(ctx context.Context, actor *ateapipb.Actor, opName string) {
 	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(actor))
+	attrs = append(attrs, ateattr.WorkerPlacementLogAttrs(actor.GetStatus().GetWorkerAssignment())...)
 	attrs = append(attrs, slog.String(string(ateattr.ActorOperationNameKey), ateattr.NormalizeOperationName(opName)))
 	attrs = append(attrs, slog.String(string(ateattr.ActorStateKey), ateattr.ActorStateCrashed))
 	actorevent.Log(ctx, actorevent.Crashed, attrs)
