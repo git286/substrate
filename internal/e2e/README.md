@@ -54,6 +54,16 @@ installs the fixtures elsewhere: `E2E_SUBSTRATE_TEMPLATE_ATESPACE` /
 gVisor, 10m on micro-VM, where the golden is a cloud-hypervisor cold boot plus
 a checkpoint).
 
+## Suites that read the collector
+
+`suites/metrics` and `suites/actortelemetry` assert on what reached the kind
+stack's OTel Collector, through its Prometheus surface. A cluster without that
+collector, such as GKE with managed OTLP, cannot serve those assertions.
+`E2E_COLLECTOR_SCRAPE=false` turns them off; the actortelemetry suite then
+still verifies the relay path end to end through the actor's own export
+acknowledgements. CI runs against kind and leaves the knob unset, so a missing
+collector fails there rather than skipping.
+
 ## After a failure
 
 A suite deletes the namespaces it created only when it passed. A failed run

@@ -420,7 +420,25 @@ The relay is best-effort. If the socket is absent when ateom starts — `atelet`
 
 For verified ateom sources, the relay forwards each request verbatim rather than decoding and re-exporting, which is what keeps every ateom its own service in Jaeger/GCP Trace instead of being absorbed into `atelet`'s. `ate-controller` injects `k8s.pod.name`, `k8s.namespace.name`, `k8s.pod.uid`, `k8s.node.name`, and `service.instance.id` directly into `OTEL_RESOURCE_ATTRIBUTES` via the Kubernetes Downward API; because the relay preserves resources verbatim, Kubernetes attributes remain intact even though the TCP connection to the collector originates from `atelet` rather than the worker pod IP (bypassing reliance on collector-side IP-based `k8sattributes` enrichment).
 
-Verbatim forwarding is restricted to known ateom sources and refuses anything else with `PermissionDenied`. Actor telemetry is what that excludes: actors share a hostname (`actor`) and an interior IP, so their series merge unless identity is injected from outside the actor ([#761](https://github.com/agent-substrate/substrate/issues/761)) — a rewrite, which will be implemented as an explicit rewriting path alongside this forwarder.
+Verbatim forwarding is restricted to known ateom sources, plus actor telemetry that an ateom has already rewritten (marked `ate.telemetry.plane=actor`, below), and refuses anything else with `PermissionDenied`. An actor's own identity claims never reach the socket: they are replaced one hop earlier.
+
+### The actor telemetry relay
+
+Actors cannot be trusted to identify their own telemetry, and after a golden snapshot they cannot even do so by accident: whatever identity the SDK computed at build time is frozen into every actor restored from the snapshot, so a template's actors all report one instance and one counter baseline ([#761](https://github.com/agent-substrate/substrate/issues/761), [#853](https://github.com/agent-substrate/substrate/issues/853)). Attribution therefore belongs to the channel, as it already does for [actor logs](#1-logging). ateom serves each actor an OTLP endpoint from inside the actor's own network and attributes what arrives ([`internal/actorotlp`](../internal/actorotlp)):
+
+```
+actor SDK ──OTLP to 169.254.17.1:4317 (gRPC) or :4318 (HTTP/protobuf)──► ateom actor relay ──unix socket──► atelet relay ──► collector
+```
+
+Every actor container starts with `OTEL_EXPORTER_OTLP_ENDPOINT=http://169.254.17.1:4317`, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta`, and `OTEL_METRIC_EXPORT_INTERVAL=5000`, set by atelet below the template's own env. These are constants, so freezing them into the golden is safe; what answers at the address is per activation. The listener is opened inside the actor's network namespace, so it can be reached by that actor alone, which is what identifies the sender without any lookup. A restored actor's exporter reconnects to the same address on whichever worker it lands on.
+
+Per export, ateom drops every `ate.*`, `service.*`, and `k8s.*` attribute the actor sent, at the resource and at every level below it, then stamps the platform's view. Metrics get the bounded writer identity only: `service.name` and `service.namespace` are the template, `service.instance.id` is `<worker pod UID>/<slot>`, plus `ate.template.*`, `ate.actor.slot`, the worker's `k8s.*` facts, and `ate.telemetry.plane=actor`. Traces and logs get `ate.atespace`, `ate.actor.name`, and `ate.actor.uid` as well; log records carry that identity as record attributes too, under the same keys as the labels on an actor's stdout lines, so both log streams filter alike in a backend that keeps record attributes but not the resource's. Two live actors on one worker never share a slot, so each series has one writer at a time and the series count stays bounded by workers times capacity rather than by actors ever run. Metrics tell you what happened to a template on a worker; traces and logs tell you which actor did it.
+
+ateom also rewrites metric timestamps: each point's time becomes the receive time, kept strictly increasing per actor, and a start time older than the activation is raised to it. Without this, a restored actor reports the golden build's start and a possibly lagging clock, and the collector's delta-to-cumulative conversion drops the points as older than the stream or out of order.
+
+There is no fallback to the pod network for actor telemetry. Without the socket, the endpoint refuses exports as `Unavailable`, so the actor's SDK reports the drop. Each actor also has a request budget; beyond it the relay answers `ResourceExhausted`, which the SDKs retry with backoff. `ate.actor.telemetry.requests` counts every export by signal and outcome (see [the metric registry](#the-metric-registry)); an actor whose exports never appear there is not pointed at the relay, and one whose exports all carry an `error.type` is pointed at it and losing telemetry.
+
+Per-actor gauges do not work under this model: a slot's gauge series mixes actors over time and holds a dead actor's last value until the next one writes. Use counters and histograms for additive quantities and logs or events for per-actor state.
 
 ---
 

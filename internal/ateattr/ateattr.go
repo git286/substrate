@@ -93,6 +93,34 @@ const (
 // Only the components that have a relay to take or miss carry it.
 const OTLPRelayKey = attribute.Key("ate.otlp.relay")
 
+// TelemetryPlaneKey is a resource attribute that says whose telemetry a signal
+// is: the platform's own, or an actor's, relayed and attributed by ateom. It
+// is what lets a consumer route or rate the two apart without a second socket
+// or endpoint, and what atelet's relay keys its source check on. Only ateom
+// sets it, and only on telemetry it has rewritten.
+const TelemetryPlaneKey = attribute.Key("ate.telemetry.plane")
+
+// TelemetryPlaneActor is the TelemetryPlaneKey value of actor telemetry.
+const TelemetryPlaneActor = "actor"
+
+// ActorSlotKey is the position an actor holds among the actors its worker pod
+// hosts at the same time. Two live actors on one worker never share a slot,
+// so the (worker pod, slot) pair is a single-writer identity for metric series
+// while staying bounded by the worker's capacity rather than by how many
+// actors ever ran. Actors succeed one another in a slot over time; a series
+// carries no boundary between them by design.
+const ActorSlotKey = attribute.Key("ate.actor.slot")
+
+// TelemetrySignalKey is the OTLP signal a relay request carried.
+const TelemetrySignalKey = attribute.Key("ate.telemetry.signal")
+
+// Values for TelemetrySignalKey.
+const (
+	TelemetrySignalTraces  = "traces"
+	TelemetrySignalMetrics = "metrics"
+	TelemetrySignalLogs    = "logs"
+)
+
 // ActorStateKey is log-only. It is bounded, but it is only ever recorded beside
 // actor identity, which no metric may carry.
 const ActorStateKey = attribute.Key("ate.actor.state")

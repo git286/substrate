@@ -78,16 +78,35 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 		}
 	}
 
+	// The telemetry relay learns the activation before the actor's listeners
+	// serve, so every connection they accept is bound to this actor.
+	var services []ateomnet.SandboxService
+	if s.actorTelemetry != nil {
+		if err := s.actorTelemetry.Register(attribution); err != nil {
+			s.actorsMu.Lock()
+			delete(s.actors, uid)
+			s.actorsMu.Unlock()
+			return nil, fmt.Errorf("while registering the actor with the telemetry relay: %w", err)
+		}
+		services = append(services, s.actorTelemetry)
+	}
+	unhost := func() {
+		if s.actorTelemetry != nil {
+			s.actorTelemetry.Release(uid)
+		}
+		s.actorsMu.Lock()
+		delete(s.actors, uid)
+		s.actorsMu.Unlock()
+	}
+
 	session, err := ateomnet.ServeSandbox(ctx, ateomnet.SandboxNetworkConfig{
 		ActorUID:   uid,
 		Veth:       true,
 		EgressPort: s.tunnel.EgressPort,
 		DNSPort:    atunnel.DNSPort,
-	}, s.tunnel.Egress, s.tunnel.DNSRelay)
+	}, s.tunnel.Egress, s.tunnel.DNSRelay, services...)
 	if err != nil {
-		s.actorsMu.Lock()
-		delete(s.actors, uid)
-		s.actorsMu.Unlock()
+		unhost()
 		return nil, fmt.Errorf("while setting up the sandbox network: %w", err)
 	}
 
@@ -95,9 +114,7 @@ func (s *AteomService) hostActor(ctx context.Context, attribution resources.Acto
 	resolvConf, err := actorResolvConf(actorDirs)
 	if err != nil {
 		_ = session.Close(ctx)
-		s.actorsMu.Lock()
-		delete(s.actors, uid)
-		s.actorsMu.Unlock()
+		unhost()
 		return nil, err
 	}
 
@@ -128,6 +145,13 @@ func (s *AteomService) unhostActor(ctx context.Context, actorUID string) error {
 	}()
 
 	removeActorResolvConf(ctx, hosted.resolvConf)
+	// The activation ends after its listeners are closed, never before: a
+	// connection still bound to it must not outlive the slot's reuse.
+	defer func() {
+		if s.actorTelemetry != nil {
+			s.actorTelemetry.Release(actorUID)
+		}
+	}()
 	if hosted.network == nil {
 		return nil
 	}

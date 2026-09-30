@@ -43,6 +43,8 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
@@ -990,5 +992,68 @@ func TestSocketPermissions(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("socket permissions = %04o, want 0600", perm)
+	}
+}
+
+// actorPlaneResource is what ateom's actor relay forwards: a template's
+// service.name, which is on no allowlist, plus the plane attribute that says
+// ateom already attributed it.
+func actorPlaneResource(service string) *resourcepb.Resource {
+	return &resourcepb.Resource{
+		Attributes: []*commonpb.KeyValue{
+			{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: service}}},
+			{Key: string(ateattr.TelemetryPlaneKey), Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: ateattr.TelemetryPlaneActor}}},
+		},
+	}
+}
+
+// TestRelayForwardsActorPlane: actor telemetry reaches this socket only after
+// ateom has rewritten it, and then carries the template's service.name rather
+// than an ateom's. The plane attribute is what admits it; the same name
+// without the attribute is still refused (TestRelayRefusesNonAteomSource).
+func TestRelayForwardsActorPlane(t *testing.T) {
+	sink, collector := startFakeCollector(t)
+	sock := startRelay(t, collector)
+
+	conn, err := Dial(context.Background(), sock)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := coltracepb.NewTraceServiceClient(conn).Export(context.Background(), &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{Resource: actorPlaneResource("crawler")}},
+	}); err != nil {
+		t.Errorf("trace Export of actor-plane telemetry: %v, want success", err)
+	}
+	if _, err := colmetricspb.NewMetricsServiceClient(conn).Export(context.Background(), &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{{Resource: actorPlaneResource("crawler")}},
+	}); err != nil {
+		t.Errorf("metric Export of actor-plane telemetry: %v, want success", err)
+	}
+	if _, err := collogspb.NewLogsServiceClient(conn).Export(context.Background(), &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{Resource: actorPlaneResource("crawler")}},
+	}); err != nil {
+		t.Errorf("log Export of actor-plane telemetry: %v, want success", err)
+	}
+
+	// A plane value other than actor admits nothing: the attribute is a
+	// statement that ateom rewrote the resource, not a free-form tag.
+	other := actorPlaneResource("crawler")
+	other.Attributes[1].Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "platform"}}
+	_, err = coltracepb.NewTraceServiceClient(conn).Export(context.Background(), &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{Resource: other}},
+	})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Errorf("Export with ate.telemetry.plane=platform = %v, want PermissionDenied", got)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.traces) != 1 || len(sink.metrics) != 1 || len(sink.logs) != 1 {
+		t.Errorf("collector received %d traces, %d metrics, %d logs, want 1 of each", len(sink.traces), len(sink.metrics), len(sink.logs))
+	}
+	if got := resourceServiceName(sink.traces[0].GetResourceSpans()[0].GetResource()); got != "crawler" {
+		t.Errorf("forwarded service.name = %q, want the template's name passed through verbatim", got)
 	}
 }

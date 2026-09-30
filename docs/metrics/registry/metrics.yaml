@@ -69,6 +69,21 @@ groups:
           docs/metrics/substrate.yaml. It separates two actors that held the
           same name at different times.
         examples: [8f2a1c4e6b0d47f1]
+      - id: ate.actor.slot
+        stability: development
+        type: int
+        brief: >
+          The position the actor holds among the actors its worker pod hosts
+          at the same time.
+        note: >
+          The one actor-scoped key a metric label may carry. Two live actors
+          on one worker never share a slot, so the (worker pod, slot) pair
+          names a single writer at any moment, and the number of values is
+          bounded by the worker's capacity rather than by how many actors ever
+          ran. Actors succeed one another in a slot; a series carries no
+          boundary between them by design. ateom's actor telemetry relay
+          stamps it, and sets service.instance.id from the same pair.
+        examples: [0, 7]
       - id: ate.actor.epoch
         stability: development
         type: int
@@ -167,6 +182,45 @@ groups:
               stability: development
               value: unknown
               brief: The operation is not in this list. This is the default value.
+
+  - id: registry.ate.telemetry
+    type: attribute_group
+    brief: >
+      The labels of the telemetry pipeline itself: whose telemetry a signal
+      is, and which signal a relay request carried.
+    attributes:
+      - id: ate.telemetry.plane
+        stability: development
+        brief: Whose telemetry a resource is.
+        note: >
+          A resource attribute. Only ateom's actor telemetry relay sets it,
+          and only on telemetry it has stripped of the actor's own identity
+          claims and re-attributed. atelet's relay admits actor-plane
+          resources on the strength of it; a consumer routes or rate-limits
+          the two planes apart by it.
+        type:
+          members:
+            - id: actor
+              stability: development
+              value: actor
+              brief: An actor's telemetry, attributed by ateom.
+      - id: ate.telemetry.signal
+        stability: development
+        brief: The OTLP signal a relay request carried.
+        type:
+          members:
+            - id: traces
+              stability: development
+              value: traces
+              brief: An ExportTraceServiceRequest.
+            - id: metrics
+              stability: development
+              value: metrics
+              brief: An ExportMetricsServiceRequest.
+            - id: logs
+              stability: development
+              value: logs
+              brief: An ExportLogsServiceRequest.
 
   - id: registry.ate.template
     type: attribute_group
@@ -1049,6 +1103,42 @@ groups:
             The outcome is error. The key holds the HTTP status of the registry.
             The permitted values are 401, 403, 404, 429, 500, 502, 503 and 504.
             Each other status, and each failure with no status, reports _OTHER.
+
+  - id: metric.ate.actor.telemetry.requests
+    type: metric
+    metric_name: ate.actor.telemetry.requests
+    instrument: counter
+    unit: "{request}"
+    stability: development
+    brief: The OTLP export requests actors sent to ateom's telemetry relay, by signal and outcome.
+    note: >
+      One request is one Export call from an actor's SDK, over gRPC or
+      HTTP/protobuf. A request that ateom refused or that atelet or the
+      collector failed carries error.type; one that was forwarded and
+      acknowledged carries none. An actor whose exports never appear here is
+      not pointed at the relay; one whose exports all carry an error is
+      pointed at it and losing telemetry, which the actor's own logs may be
+      the only other place to see.
+    annotations:
+      substrate:
+        emitted_by: [ateom-gvisor, ateom-microvm]
+        golden_signals: [traffic, errors]
+        code_anchor: internal/actorotlp/relay.go
+        cuj: An actor's metrics are missing. Did its exports reach the relay, and did the relay accept them?
+    attributes:
+      - ref: ate.telemetry.signal
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: error.type
+        requirement_level:
+          conditionally_required: >
+            The request failed. The value is the gRPC status code name the
+            actor received, for example ResourceExhausted when the actor
+            exceeded its budget, Unavailable when the relay has no path to
+            atelet, or the code the collector returned.
 
   # ---------------------------------------------------------------------------
   # Metrics. atecontroller

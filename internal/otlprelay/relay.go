@@ -39,9 +39,10 @@
 // into SDK records and re-exporting. Verbatim pass-through keeps each ateom's
 // own resource (service.name, service.instance.id, pod attributes) intact, so
 // its spans stay attributed to ateom instead of being absorbed into atelet's.
-// Restricting this pass-through to verified ateom sources ensures that future
-// actor telemetry requiring identity rewrites (#761) will be added as an
-// explicit rewriting path alongside this forwarder; see ateomServices.
+// The pass-through is restricted to sources whose identity is already right:
+// the ateoms themselves, and actor telemetry that an ateom's actor relay
+// (internal/actorotlp) has rewritten and marked as such. An actor's own
+// identity claims never reach this socket; see ateomServices and isActorPlane.
 //
 // Verbatim applies to the payload, not to the call around it. The request's
 // metadata is dropped and replaced with the headers atelet resolves from its own
@@ -75,6 +76,8 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+
+	"github.com/agent-substrate/substrate/internal/ateattr"
 )
 
 const (
@@ -134,9 +137,10 @@ type Server struct {
 // This allowlist is a protocol contract rather than a security boundary:
 // service.name is client-provided, so a compromised process could claim an
 // ateom name. Its purpose is to prevent accidental misuse (e.g. an actor SDK
-// pointed at the socket) and keep the pass-through contract explicit for #761.
-// Peer authentication, if needed, would require per-pod sockets or UDS peer
-// credentials (SO_PEERCRED) tied to #741.
+// pointed at the socket) and keep the pass-through contract explicit. Actor
+// telemetry is admitted by isActorPlane instead, since ateom rewrites its
+// service.name to the template's. Peer authentication, if needed, would
+// require per-pod sockets or UDS peer credentials (SO_PEERCRED).
 var ateomServices = map[string]bool{
 	"ateom-gvisor":  true,
 	"ateom-microvm": true,
@@ -173,7 +177,7 @@ func newSourceGate() *sourceGate {
 // unidentified source is the one the relay cannot vouch for.
 func (g *sourceGate) check(ctx context.Context, r *resourcepb.Resource) error {
 	name := resourceServiceName(r)
-	if ateomServices[name] {
+	if ateomServices[name] || isActorPlane(r) {
 		return nil
 	}
 	if g.logged == nil {
@@ -207,6 +211,22 @@ func resourceServiceName(r *resourcepb.Resource) string {
 		}
 	}
 	return ""
+}
+
+// isActorPlane reports whether the resource is actor telemetry that an ateom
+// has already attributed: ateom's actor relay (internal/actorotlp) strips what
+// the actor claimed and stamps the plane along with the trusted identity, so
+// by the time it reaches this socket it carries a template's service.name
+// rather than an ateom's. Like ateomServices, this is a protocol contract, not
+// a security boundary: anything that can reach the root-only socket could set
+// the attribute, and the socket's permissions are what keep actors from it.
+func isActorPlane(r *resourcepb.Resource) bool {
+	for _, attr := range r.GetAttributes() {
+		if attr.GetKey() == string(ateattr.TelemetryPlaneKey) {
+			return attr.GetValue().GetStringValue() == ateattr.TelemetryPlaneActor
+		}
+	}
+	return false
 }
 
 // upstreamContext builds the metadata for the upstream call from atelet's own

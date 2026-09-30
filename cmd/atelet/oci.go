@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ateletpath"
+	"github.com/agent-substrate/substrate/internal/actorotlp"
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
@@ -207,10 +208,10 @@ func resolveImageVolumes(ctx context.Context, imageCache *imagecache.Store, volu
 	return out, nil
 }
 
-// resolveActorEnv computes the final container environment from the image's ENV
-// and the ActorTemplate env, with the template taking precedence. Duplicate keys
-// are removed in favor of template env > image env, and a default PATH stands in
-// when neither source sets one.
+// resolveActorEnv computes the final container environment from the image's ENV,
+// the ActorTemplate env, and the platform's actor telemetry defaults. Duplicate
+// keys are removed in favor of template env > telemetry defaults > image env,
+// and a default PATH stands in when no source sets one.
 func resolveActorEnv(imageCfg *v1.Config, templateEnv []string) []string {
 	var imageEnv []string
 	if imageCfg != nil {
@@ -234,6 +235,9 @@ func resolveActorEnv(imageCfg *v1.Config, templateEnv []string) []string {
 	}
 
 	add(templateEnv...)
+	// The telemetry endpoint sits between: a template author's choice wins,
+	// but an image's baked-in OTEL_* must not point the actor past the relay.
+	add(actorotlp.ActorEnv()...)
 	add(imageEnv...)
 	add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	return out

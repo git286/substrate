@@ -18,12 +18,21 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/agent-substrate/substrate/internal/actorotlp"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 func TestResolveActorEnv(t *testing.T) {
 	defaultPath := "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	// The telemetry defaults sit between the template and the image; see
+	// actorotlp.ActorEnv for why they are constants.
+	telemetry := actorotlp.ActorEnv()
+	withTelemetry := func(before []string, after ...string) []string {
+		out := append([]string{}, before...)
+		out = append(out, telemetry...)
+		return append(out, after...)
+	}
 
 	tests := []struct {
 		name        string
@@ -35,35 +44,50 @@ func TestResolveActorEnv(t *testing.T) {
 			name:        "template overrides image by key",
 			image:       &v1.Config{Env: []string{"FOO=image"}},
 			templateEnv: []string{"FOO=template"},
-			want:        []string{"FOO=template", defaultPath},
+			want:        withTelemetry([]string{"FOO=template"}, defaultPath),
 		},
 		{
 			name:        "default PATH applies when neither sets it",
 			image:       &v1.Config{Env: []string{"FOO=image"}},
 			templateEnv: []string{"BAR=template"},
-			want:        []string{"BAR=template", "FOO=image", defaultPath},
+			want:        withTelemetry([]string{"BAR=template"}, "FOO=image", defaultPath),
 		},
 		{
 			name:  "image PATH overrides default",
 			image: &v1.Config{Env: []string{"PATH=/image/bin"}},
-			want:  []string{"PATH=/image/bin"},
+			want:  withTelemetry(nil, "PATH=/image/bin"),
 		},
 		{
 			name:        "template PATH overrides default",
 			image:       &v1.Config{},
 			templateEnv: []string{"PATH=/template/bin"},
-			want:        []string{"PATH=/template/bin"},
+			want:        withTelemetry([]string{"PATH=/template/bin"}),
 		},
 		{
 			name:  "blank and keyless entries are dropped",
 			image: &v1.Config{Env: []string{"", "=novalue"}},
-			want:  []string{defaultPath},
+			want:  withTelemetry(nil, defaultPath),
 		},
 		{
 			name:        "nil image config uses template env and default PATH",
 			image:       nil,
 			templateEnv: []string{"FOO=template"},
-			want:        []string{"FOO=template", defaultPath},
+			want:        withTelemetry([]string{"FOO=template"}, defaultPath),
+		},
+		{
+			// The relay is where attribution happens, so an image that bakes in
+			// a collector address must not steer the actor around it; a template
+			// author, who owns the actor's configuration, may.
+			name:        "template telemetry env wins over the defaults, image telemetry env loses",
+			image:       &v1.Config{Env: []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://image-collector:4317", "OTEL_METRIC_EXPORT_INTERVAL=60000"}},
+			templateEnv: []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://template-collector:4317"},
+			want: []string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT=http://template-collector:4317",
+				"OTEL_EXPORTER_OTLP_PROTOCOL=grpc",
+				"OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta",
+				"OTEL_METRIC_EXPORT_INTERVAL=5000",
+				defaultPath,
+			},
 		},
 	}
 

@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The otelprobe fixture's ActorTemplate: a protojson-shaped
+# ateapipb.ActorTemplate created through the ate API by
+# e2e.DeploySubstrateFixture after ko resolve pins the image. The template
+# sets no OTEL_* env of its own: the point is that the platform's defaults
+# alone point the SDK at the relay.
+
+metadata:
+  atespace: ate-e2e-otelprobe${FIXTURE_SUFFIX}
+  name: otelprobe
+workerSelector:
+  matchLabels:
+    workload: otelprobe${FIXTURE_SUFFIX}
+containers:
+- name: otelprobe
+  image: ko://github.com/agent-substrate/substrate/internal/e2e/fixtures/otelprobe
+  command: ["/ko-app/otelprobe"]
+  wakeupProbe:
+    httpGet:
+      path: /healthz
+      port: 80
+${TEMPLATE_RESOURCES}
+${TEMPLATE_SANDBOX_CONFIG}
+snapshotConfig:
+  storageLocation: gs://${BUCKET_NAME}/ate-e2e-otelprobe${FIXTURE_SUFFIX}/

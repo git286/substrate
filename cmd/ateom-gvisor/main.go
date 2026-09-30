@@ -35,6 +35,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
+	"github.com/agent-substrate/substrate/internal/actorotlp"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
 	"github.com/agent-substrate/substrate/internal/ateomcgroup"
@@ -173,6 +174,18 @@ func do(ctx context.Context) error {
 		defer serverboot.ShutdownProvider("LoggerProvider", lp.Shutdown)
 	}
 
+	// The actor telemetry relay shares the path to atelet. It serves the
+	// endpoint even when relayConn is nil, refusing exports as Unavailable, so
+	// an actor's SDK reports the drop rather than hanging on a dead address.
+	var actorTelemetry *actorotlp.Relay
+	if *maxActors > 0 {
+		actorTelemetry, err = actorotlp.New(relayConn, actorotlp.WorkerFromEnv(*podUID), *maxActors)
+		if err != nil {
+			return fmt.Errorf("while building the actor telemetry relay: %w", err)
+		}
+		actorTelemetry.LogRelayStart(ctx)
+	}
+
 	// Create ateom dir
 	ateomDir := nodepath.AteomPath(*podUID)
 	if err := resources.ValidateAteomUID(*podUID); err != nil {
@@ -213,7 +226,7 @@ func do(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ateomService := NewService(tunnel, actorLogger, *maxActors)
+	ateomService := NewService(tunnel, actorTelemetry, actorLogger, *maxActors)
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -300,6 +313,10 @@ type AteomService struct {
 	actorLogger *actorlog.ActorLogger
 	tunnel      *ateomtunnel.Tunnel
 
+	// actorTelemetry serves each actor's OTLP endpoint from inside its
+	// namespace and attributes what arrives; nil when the worker hosts no actors.
+	actorTelemetry *actorotlp.Relay
+
 	// shuttingDown is set once SIGTERM has been received. While true, new
 	// workload RPCs are rejected with codes.Unavailable.
 	shuttingDown atomic.Bool
@@ -319,15 +336,16 @@ type AteomService struct {
 var _ ateompb.AteomServer = (*AteomService)(nil)
 
 // NewService creates a new AteomService.
-func NewService(tunnel *ateomtunnel.Tunnel, actorLogger *actorlog.ActorLogger, maxActors int) *AteomService {
+func NewService(tunnel *ateomtunnel.Tunnel, actorTelemetry *actorotlp.Relay, actorLogger *actorlog.ActorLogger, maxActors int) *AteomService {
 	return &AteomService{
-		locks:       actorlock.New(),
-		inFlight:    actorlock.NewInFlight(),
-		actors:      map[string]*hostedActor{},
-		maxActors:   maxActors,
-		tunnel:      tunnel,
-		actorLogger: actorLogger,
-		cgroupRoot:  defaultCgroupRoot,
+		actorTelemetry: actorTelemetry,
+		locks:          actorlock.New(),
+		inFlight:       actorlock.NewInFlight(),
+		actors:         map[string]*hostedActor{},
+		maxActors:      maxActors,
+		tunnel:         tunnel,
+		actorLogger:    actorLogger,
+		cgroupRoot:     defaultCgroupRoot,
 	}
 }
 
