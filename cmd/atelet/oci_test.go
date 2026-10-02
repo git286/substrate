@@ -83,7 +83,6 @@ func TestResolveActorEnv(t *testing.T) {
 			templateEnv: []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://template-collector:4317"},
 			want: []string{
 				"OTEL_EXPORTER_OTLP_ENDPOINT=http://template-collector:4317",
-				"OTEL_EXPORTER_OTLP_PROTOCOL=grpc",
 				"OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta",
 				"OTEL_METRIC_EXPORT_INTERVAL=5000",
 				defaultPath,

@@ -22,7 +22,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,11 +136,11 @@ func newRelay(t *testing.T, upstream *grpc.ClientConn) (*Relay, *time.Time) {
 	return r, &now
 }
 
-// endpoint serves the actor's two listeners on loopback and returns their
-// addresses. The HTTP listener's port is what tells the relay which is which.
+// endpoint serves the actor's one listener on loopback and exposes it both
+// as a gRPC connection and as an HTTP base URL: the same socket answers both.
 type endpoint struct {
 	grpcConn *grpc.ClientConn
-	grpcAddr string
+	addr     string
 	httpBase string
 }
 
@@ -151,34 +150,26 @@ func serveActor(t *testing.T, r *Relay, actorUID string) endpoint {
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
-	grpcLis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	httpLis, err := net.Listen("tcp", "127.0.0.1:0")
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 2)
-	go func() { done <- serve(ctx, grpcLis) }()
-	go func() { done <- serve(ctx, httpLis) }()
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, lis) }()
 	t.Cleanup(func() {
-		grpcLis.Close()
-		httpLis.Close()
+		lis.Close()
 		cancel()
-		for range 2 {
-			if err := <-done; err != nil {
-				t.Errorf("serve returned %v after the listener closed, want nil", err)
-			}
+		if err := <-done; err != nil {
+			t.Errorf("serve returned %v after the listener closed, want nil", err)
 		}
 	})
-	conn, err := grpc.NewClient(grpcLis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return endpoint{grpcConn: conn, grpcAddr: grpcLis.Addr().String(), httpBase: "http://" + httpLis.Addr().String()}
+	return endpoint{grpcConn: conn, addr: lis.Addr().String(), httpBase: "http://" + lis.Addr().String()}
 }
 
 func str(key, value string) *commonpb.KeyValue { return stringAttr(key, value) }
@@ -660,12 +651,12 @@ func TestClosingTheListenerStopsAcceptedConnections(t *testing.T) {
 	}
 }
 
-// TestEveryListenerSpeaksBothProtocols is the property the environment
-// relies on: it points every actor at one port, so an SDK that only speaks
-// HTTP/protobuf, or that ignores OTEL_EXPORTER_OTLP_PROTOCOL, must be served
-// there too. The test crosses the protocols over: HTTP to the listener a gRPC
-// client would use, and gRPC to the one an HTTP client would use.
-func TestEveryListenerSpeaksBothProtocols(t *testing.T) {
+// TestOneListenerSpeaksBothProtocols is the property the environment relies
+// on: it points every actor at one port, so an SDK that only speaks
+// HTTP/protobuf, or that has no protocol setting, must be served there too.
+// The other tests already drive the listener over gRPC and over HTTP
+// separately; this one interleaves both on the same socket.
+func TestOneListenerSpeaksBothProtocols(t *testing.T) {
 	s, upstream := startSink(t)
 	r, _ := newRelay(t, upstream)
 	if err := r.Register(actorA); err != nil {
@@ -673,25 +664,20 @@ func TestEveryListenerSpeaksBothProtocols(t *testing.T) {
 	}
 	ep := serveActor(t, r, actorA.UID)
 
-	// HTTP/protobuf to the gRPC connection's address.
 	body, _ := proto.Marshal(&coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{Resource: forgedResource()}}})
-	resp, err := http.Post("http://"+ep.grpcAddr+"/v1/traces", "application/x-protobuf", bytes.NewReader(body))
+	resp, err := http.Post(ep.httpBase+"/v1/traces", "application/x-protobuf", bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("HTTP POST to the gRPC listener: %v", err)
+		t.Fatalf("HTTP POST: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("HTTP POST to the gRPC listener = %d, want 200", resp.StatusCode)
+		t.Errorf("HTTP POST = %d, want 200", resp.StatusCode)
 	}
-
-	// gRPC to the HTTP listener's address.
-	conn, err := grpc.NewClient(strings.TrimPrefix(ep.httpBase, "http://"), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := collogspb.NewLogsServiceClient(ep.grpcConn).Export(context.Background(), &collogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{Resource: forgedResource()}}}); err != nil {
+		t.Errorf("gRPC export on the same listener: %v", err)
 	}
-	defer conn.Close()
-	if _, err := collogspb.NewLogsServiceClient(conn).Export(context.Background(), &collogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{Resource: forgedResource()}}}); err != nil {
-		t.Errorf("gRPC export to the HTTP listener: %v", err)
+	if ports := r.Ports(); len(ports) != 1 || ports[0] != Port {
+		t.Errorf("Ports() = %v, want exactly [%d]: one listener per actor", ports, Port)
 	}
 
 	s.mu.Lock()
@@ -700,6 +686,6 @@ func TestEveryListenerSpeaksBothProtocols(t *testing.T) {
 		t.Errorf("upstream got %d traces and %d logs, want 1 and 1", len(s.traces), len(s.logs))
 	}
 	if got := attrMap(s.traces[0].GetResourceSpans()[0].GetResource().GetAttributes())["service.name"]; got != "crawler" {
-		t.Errorf("HTTP export on the gRPC listener was attributed to %q, want crawler", got)
+		t.Errorf("HTTP export was attributed to %q, want crawler", got)
 	}
 }

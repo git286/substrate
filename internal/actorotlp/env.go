@@ -22,7 +22,10 @@ import "strconv"
 // linux-only); TestGatewayAddressMatchesAteomnet keeps the two equal.
 const GatewayAddress = "169.254.17.1"
 
-// Endpoint is the OTLP/gRPC endpoint as an actor's exporter sees it.
+// Endpoint is the OTLP endpoint as an actor's exporter sees it. It answers
+// gRPC and HTTP/protobuf alike, so no protocol variable is set: whichever an
+// SDK speaks by default, or is told to speak by its own configuration, is
+// served here. Under OTLP/HTTP the SDK appends the signal path to it.
 const Endpoint = "http://" + GatewayAddress + ":4317"
 
 // metricExportIntervalMillis is short because actors are often short-lived
@@ -40,7 +43,6 @@ const metricExportIntervalMillis = 5000
 func ActorEnv() []string {
 	return []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" + Endpoint,
-		"OTEL_EXPORTER_OTLP_PROTOCOL=grpc",
 		"OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta",
 		"OTEL_METRIC_EXPORT_INTERVAL=" + strconv.Itoa(metricExportIntervalMillis),
 	}

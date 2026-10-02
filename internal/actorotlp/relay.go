@@ -76,13 +76,15 @@ import (
 )
 
 const (
-	// GRPCPort and HTTPPort are the standard OTLP ports. Both are served, and
-	// each speaks both protocols: the environment points every actor at
-	// GRPCPort, and an SDK that only speaks HTTP/protobuf, or that honors the
-	// endpoint variable but not the protocol one, posts HTTP there. A port that
-	// answered only one protocol would be a silent black hole for the other.
-	GRPCPort uint16 = 4317
-	HTTPPort uint16 = 4318
+	// Port is the one port the relay serves, and it speaks both OTLP
+	// protocols. The environment points every actor here, and an SDK that only
+	// speaks HTTP/protobuf, or that honors the endpoint variable but not a
+	// protocol one, posts HTTP to the same address and is served. A second
+	// port for HTTP would serve nobody: an SDK with no endpoint configured
+	// defaults to localhost, never to the gateway, so the only traffic that
+	// could reach it is from an author who typed the address, and that author
+	// can type this one.
+	Port uint16 = 4317
 
 	// maxRecvMsgSize bounds one export. The OTel SDKs' batch processors emit
 	// far smaller messages; the bound is against a sandbox that does not.
@@ -132,9 +134,7 @@ type Relay struct {
 	upstream *grpc.ClientConn
 	worker   Worker
 	// now is the relay's clock, replaced in tests.
-	now                func() time.Time
-	grpcPort, httpPort uint16
-
+	now      func() time.Time
 	requests metric.Int64Counter
 
 	mu     sync.Mutex
@@ -175,8 +175,6 @@ func New(upstream *grpc.ClientConn, worker Worker, maxActors int) (*Relay, error
 		upstream: upstream,
 		worker:   worker,
 		now:      time.Now,
-		grpcPort: GRPCPort,
-		httpPort: HTTPPort,
 		requests: requests,
 		actors:   map[string]*activation{},
 		slots:    make([]bool, maxActors),
@@ -243,14 +241,14 @@ func (r *Relay) Slot(actorUID string) (slot int, ok bool) {
 	return act.slot, true
 }
 
-// Ports implements ateomnet.SandboxService: the listeners each actor gets in
+// Ports implements ateomnet.SandboxService: the listener each actor gets in
 // its gateway namespace.
-func (r *Relay) Ports() []uint16 { return []uint16{r.grpcPort, r.httpPort} }
+func (r *Relay) Ports() []uint16 { return []uint16{Port} }
 
 // Bind implements ateomnet.SandboxService. It captures the actor's activation
 // before its listeners start serving, so a connection accepted on them can
 // never pick up a later activation's identity, and returns the function that
-// serves one listener. Every listener speaks both OTLP protocols.
+// serves the listener, which speaks both OTLP protocols.
 func (r *Relay) Bind(actorUID string) (func(context.Context, net.Listener) error, error) {
 	r.mu.Lock()
 	act, ok := r.actors[actorUID]

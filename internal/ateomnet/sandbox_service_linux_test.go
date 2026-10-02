@@ -65,7 +65,9 @@ func TestSandboxServiceIsReachableFromTheActor(t *testing.T) {
 	ctx := context.Background()
 	const actorUID = "88888888-8888-8888-8888-888888888888"
 
-	svc := &echoService{ports: []uint16{actorotlp.GRPCPort, actorotlp.HTTPPort}}
+	// Two ports, so a service that names more than one is covered; the relay
+	// itself names one.
+	svc := &echoService{ports: []uint16{actorotlp.Port, actorotlp.Port + 1}}
 	session, err := ServeSandbox(ctx, SandboxNetworkConfig{
 		ActorUID: actorUID, Veth: true, EgressPort: testEgressPort,
 	}, nil, nil, svc)
