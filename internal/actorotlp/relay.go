@@ -52,12 +52,15 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -73,10 +76,11 @@ import (
 )
 
 const (
-	// GRPCPort and HTTPPort are the standard OTLP ports. Both are served
-	// because the OTLP default protocol is HTTP/protobuf and several SDKs do
-	// not honor OTEL_EXPORTER_OTLP_PROTOCOL; an actor that defaults to the port
-	// nobody answers gets a silent black hole rather than an error.
+	// GRPCPort and HTTPPort are the standard OTLP ports. Both are served, and
+	// each speaks both protocols: the environment points every actor at
+	// GRPCPort, and an SDK that only speaks HTTP/protobuf, or that honors the
+	// endpoint variable but not the protocol one, posts HTTP there. A port that
+	// answered only one protocol would be a silent black hole for the other.
 	GRPCPort uint16 = 4317
 	HTTPPort uint16 = 4318
 
@@ -128,9 +132,7 @@ type Relay struct {
 	upstream *grpc.ClientConn
 	worker   Worker
 	// now is the relay's clock, replaced in tests.
-	now func() time.Time
-	// grpcPort and httpPort tell a listener's protocol from its port. Tests
-	// point them at ephemeral ports.
+	now                func() time.Time
 	grpcPort, httpPort uint16
 
 	requests metric.Int64Counter
@@ -248,8 +250,7 @@ func (r *Relay) Ports() []uint16 { return []uint16{r.grpcPort, r.httpPort} }
 // Bind implements ateomnet.SandboxService. It captures the actor's activation
 // before its listeners start serving, so a connection accepted on them can
 // never pick up a later activation's identity, and returns the function that
-// serves one listener. The protocol served is the listener's port's: gRPC on
-// one, HTTP/protobuf on the other.
+// serves one listener. Every listener speaks both OTLP protocols.
 func (r *Relay) Bind(actorUID string) (func(context.Context, net.Listener) error, error) {
 	r.mu.Lock()
 	act, ok := r.actors[actorUID]
@@ -258,18 +259,7 @@ func (r *Relay) Bind(actorUID string) (func(context.Context, net.Listener) error
 		return nil, fmt.Errorf("actorotlp: actor %s is not registered", actorUID)
 	}
 	ex := &exporter{relay: r, act: act}
-	return func(ctx context.Context, l net.Listener) error {
-		addr, ok := l.Addr().(*net.TCPAddr)
-		if !ok {
-			return fmt.Errorf("actorotlp: listener %v is not TCP", l.Addr())
-		}
-		switch uint16(addr.Port) {
-		case r.httpPort:
-			return ex.serveHTTP(ctx, l)
-		default:
-			return ex.serveGRPC(ctx, l)
-		}
-	}, nil
+	return ex.serve, nil
 }
 
 // exporter is one activation's view of the relay: what the servers bound to
@@ -279,34 +269,24 @@ type exporter struct {
 	act   *activation
 }
 
-// serveGRPC serves the three OTLP gRPC services on l until l is closed or ctx
-// ends, then stops the server so that connections already accepted are closed
-// too: closing a listener alone leaves them open, and an actor being torn down
-// must not keep a channel into the next occupant of its slot.
-func (e *exporter) serveGRPC(ctx context.Context, l net.Listener) error {
-	srv := grpc.NewServer(grpc.MaxRecvMsgSize(maxRecvMsgSize))
-	coltracepb.RegisterTraceServiceServer(srv, &traceService{ex: e})
-	colmetricspb.RegisterMetricsServiceServer(srv, &metricsService{ex: e})
-	collogspb.RegisterLogsServiceServer(srv, &logsService{ex: e})
+// serve answers both OTLP protocols on one listener until l is closed or ctx
+// ends. The two are told apart by what the client sends, which the protocols
+// fix: a gRPC client opens with the HTTP/2 preface and marks every request
+// application/grpc; an OTLP/HTTP client speaks HTTP/1.1, or HTTP/2 with
+// application/x-protobuf. h2c does the preface detection, and the handler
+// routes on the content type. gRPC requests go through the gRPC server's own
+// ServeHTTP, which keeps its method dispatch and message size limit.
+//
+// When the listener closes, the server is closed too, so that connections
+// already accepted are closed with it: closing a listener alone leaves them
+// open, and an actor being torn down must not keep a channel into the next
+// occupant of its slot.
+func (e *exporter) serve(ctx context.Context, l net.Listener) error {
+	grpcSrv := grpc.NewServer(grpc.MaxRecvMsgSize(maxRecvMsgSize))
+	coltracepb.RegisterTraceServiceServer(grpcSrv, &traceService{ex: e})
+	colmetricspb.RegisterMetricsServiceServer(grpcSrv, &metricsService{ex: e})
+	collogspb.RegisterLogsServiceServer(grpcSrv, &logsService{ex: e})
 
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(l) }()
-	select {
-	case err := <-done:
-		srv.Stop()
-		if errors.Is(err, net.ErrClosed) || errors.Is(err, grpc.ErrServerStopped) {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		srv.Stop()
-		<-done
-		return nil
-	}
-}
-
-// serveHTTP is serveGRPC for OTLP/HTTP with protobuf bodies.
-func (e *exporter) serveHTTP(ctx context.Context, l net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/traces", e.httpHandler(func() proto.Message { return &coltracepb.ExportTraceServiceRequest{} },
 		func(ctx context.Context, m proto.Message) (proto.Message, error) {
@@ -320,10 +300,17 @@ func (e *exporter) serveHTTP(ctx context.Context, l net.Listener) error {
 		func(ctx context.Context, m proto.Message) (proto.Message, error) {
 			return e.logs(ctx, m.(*collogspb.ExportLogsServiceRequest))
 		}))
+
+	route := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.ProtoMajor == 2 && strings.HasPrefix(req.Header.Get("Content-Type"), "application/grpc") {
+			grpcSrv.ServeHTTP(w, req)
+			return
+		}
+		mux.ServeHTTP(w, req)
+	})
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           h2c.NewHandler(route, &http2.Server{}),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       upstreamTimeout,
 	}
 
 	done := make(chan error, 1)
@@ -331,12 +318,14 @@ func (e *exporter) serveHTTP(ctx context.Context, l net.Listener) error {
 	select {
 	case err := <-done:
 		_ = srv.Close()
+		grpcSrv.Stop()
 		if errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	case <-ctx.Done():
 		_ = srv.Close()
+		grpcSrv.Stop()
 		<-done
 		return nil
 	}

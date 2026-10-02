@@ -232,16 +232,22 @@ func TargetInfoLabel(scrape, service, label string) string {
 // promLabelValue reads one label off an exposition line.
 func promLabelValue(line, label string) string {
 	key := label + `="`
-	i := strings.Index(line, key)
-	if i < 0 {
-		return ""
+	// A label starts after the opening brace or a comma. Without that anchor
+	// one label's name matches the tail of another's, ate_atespace inside
+	// ate_template_atespace, and the wrong value comes back.
+	for _, prefix := range []string{"{", ","} {
+		i := strings.Index(line, prefix+key)
+		if i < 0 {
+			continue
+		}
+		rest := line[i+len(prefix)+len(key):]
+		end := strings.IndexByte(rest, '"')
+		if end < 0 {
+			return ""
+		}
+		return rest[:end]
 	}
-	rest := line[i+len(key):]
-	end := strings.IndexByte(rest, '"')
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
+	return ""
 }
 
 // metricNameFromLine extracts the metric name from one exposition line, handling

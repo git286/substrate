@@ -36,8 +36,11 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -70,12 +73,22 @@ func (t *tally) observe(err error) {
 	t.mu.Unlock()
 }
 
-// Status is what /otel reports, per signal.
+// Status is what /otel reports: one tally set per protocol. GRPC is the
+// exporter family the platform environment asks for. HTTP is what an SDK that
+// only speaks HTTP/protobuf, or that ignores OTEL_EXPORTER_OTLP_PROTOCOL,
+// would do with the same OTEL_EXPORTER_OTLP_ENDPOINT: post to it directly.
+// Both must be served at the one address the environment names.
 type Status struct {
-	Endpoint string       `json:"endpoint"`
-	Traces   SignalStatus `json:"traces"`
-	Metrics  SignalStatus `json:"metrics"`
-	Logs     SignalStatus `json:"logs"`
+	Endpoint string         `json:"endpoint"`
+	GRPC     ProtocolStatus `json:"grpc"`
+	HTTP     ProtocolStatus `json:"http"`
+}
+
+// ProtocolStatus is the per-signal tally of one exporter family.
+type ProtocolStatus struct {
+	Traces  SignalStatus `json:"traces"`
+	Metrics SignalStatus `json:"metrics"`
+	Logs    SignalStatus `json:"logs"`
 }
 
 // SignalStatus is the export tally of one signal.
@@ -128,9 +141,63 @@ func (c *countingLogExporter) Export(ctx context.Context, records []sdklog.Recor
 	return err
 }
 
+// tallies is one exporter family's counters.
+type tallies struct{ traces, metrics, logs tally }
+
+func (t *tallies) status() ProtocolStatus {
+	return ProtocolStatus{Traces: t.traces.status(), Metrics: t.metrics.status(), Logs: t.logs.status()}
+}
+
+// start builds one exporter family's providers around the given exporters,
+// and runs the tick loop that drives them. name distinguishes the metric so
+// the two families are two series at the backend.
+func start(ctx context.Context, name string, res *resource.Resource, t *tallies,
+	spanExp sdktrace.SpanExporter, metricExp sdkmetric.Exporter, logExp sdklog.Exporter) (shutdown func()) {
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithResource(res),
+		sdktrace.WithBatcher(&countingSpanExporter{SpanExporter: spanExp, t: &t.traces}, sdktrace.WithBatchTimeout(time.Second)),
+	)
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(&countingMetricExporter{Exporter: metricExp, t: &t.metrics})),
+	)
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(&countingLogExporter{Exporter: logExp, t: &t.logs}, sdklog.WithExportInterval(time.Second))),
+	)
+
+	tracer := tp.Tracer("otelprobe")
+	ticks, err := mp.Meter("otelprobe").Int64Counter("otelprobe.ticks." + name)
+	if err != nil {
+		log.Fatalf("Int64Counter: %v", err)
+	}
+	logger := lp.Logger("otelprobe")
+
+	go func() {
+		for tick := 0; ; tick++ {
+			_, span := tracer.Start(ctx, "tick")
+			span.SetAttributes(attribute.Int("tick", tick), attribute.String("protocol", name), attribute.String("ate.actor.uid", "forged-on-span"))
+			ticks.Add(ctx, 1)
+			var rec otellog.Record
+			rec.SetTimestamp(time.Now())
+			rec.SetSeverity(otellog.SeverityInfo)
+			rec.SetBody(attribute.StringValue("tick"))
+			rec.AddAttributes(attribute.Int("tick", tick), attribute.String("protocol", name), attribute.String("ate.actor.uid", "forged-on-record"))
+			logger.Emit(ctx, rec)
+			span.End()
+			time.Sleep(time.Second)
+		}
+	}()
+	return func() {
+		_ = tp.Shutdown(ctx)
+		_ = mp.Shutdown(ctx)
+		_ = lp.Shutdown(ctx)
+	}
+}
+
 func main() {
 	ctx := context.Background()
-	var traces, metrics, logs tally
+	var grpcTallies, httpTallies tallies
 
 	// The forged identity: every key here is one the platform owns.
 	res := resource.NewSchemaless(
@@ -142,61 +209,38 @@ func main() {
 		attribute.String("probe.kept", "yes"),
 	)
 
-	// Endpoints, protocol, temporality, and export interval all come from the
+	// Endpoints, temporality, and export interval all come from the
 	// environment. Nothing is configured in code, because a real workload
-	// would not be.
-	spanExp, err := otlptracegrpc.New(ctx)
+	// would not be. The gRPC family is what the environment asks for; the HTTP
+	// family takes the same endpoint and posts to it, as an SDK that does not
+	// speak gRPC would.
+	spanGRPC, err := otlptracegrpc.New(ctx)
 	if err != nil {
 		log.Fatalf("otlptracegrpc.New: %v", err)
 	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithBatcher(&countingSpanExporter{SpanExporter: spanExp, t: &traces}, sdktrace.WithBatchTimeout(time.Second)),
-	)
-	defer tp.Shutdown(ctx)
-
-	metricExp, err := otlpmetricgrpc.New(ctx)
+	metricGRPC, err := otlpmetricgrpc.New(ctx)
 	if err != nil {
 		log.Fatalf("otlpmetricgrpc.New: %v", err)
 	}
-	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(&countingMetricExporter{Exporter: metricExp, t: &metrics})),
-	)
-	defer mp.Shutdown(ctx)
-
-	logExp, err := otlploggrpc.New(ctx)
+	logGRPC, err := otlploggrpc.New(ctx)
 	if err != nil {
 		log.Fatalf("otlploggrpc.New: %v", err)
 	}
-	lp := sdklog.NewLoggerProvider(
-		sdklog.WithResource(res),
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(&countingLogExporter{Exporter: logExp, t: &logs}, sdklog.WithExportInterval(time.Second))),
-	)
-	defer lp.Shutdown(ctx)
+	defer start(ctx, "grpc", res, &grpcTallies, spanGRPC, metricGRPC, logGRPC)()
 
-	tracer := tp.Tracer("otelprobe")
-	ticks, err := mp.Meter("otelprobe").Int64Counter("otelprobe.ticks")
+	spanHTTP, err := otlptracehttp.New(ctx)
 	if err != nil {
-		log.Fatalf("Int64Counter: %v", err)
+		log.Fatalf("otlptracehttp.New: %v", err)
 	}
-	logger := lp.Logger("otelprobe")
-
-	go func() {
-		for tick := 0; ; tick++ {
-			_, span := tracer.Start(ctx, "tick")
-			span.SetAttributes(attribute.Int("tick", tick), attribute.String("ate.actor.uid", "forged-on-span"))
-			ticks.Add(ctx, 1)
-			var rec otellog.Record
-			rec.SetTimestamp(time.Now())
-			rec.SetSeverity(otellog.SeverityInfo)
-			rec.SetBody(attribute.StringValue("tick"))
-			rec.AddAttributes(attribute.Int("tick", tick), attribute.String("ate.actor.uid", "forged-on-record"))
-			logger.Emit(ctx, rec)
-			span.End()
-			time.Sleep(time.Second)
-		}
-	}()
+	metricHTTP, err := otlpmetrichttp.New(ctx)
+	if err != nil {
+		log.Fatalf("otlpmetrichttp.New: %v", err)
+	}
+	logHTTP, err := otlploghttp.New(ctx)
+	if err != nil {
+		log.Fatalf("otlploghttp.New: %v", err)
+	}
+	defer start(ctx, "http", res, &httpTallies, spanHTTP, metricHTTP, logHTTP)()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -204,9 +248,8 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(Status{
 			Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-			Traces:   traces.status(),
-			Metrics:  metrics.status(),
-			Logs:     logs.status(),
+			GRPC:     grpcTallies.status(),
+			HTTP:     httpTallies.status(),
 		})
 	})
 	srv := &http.Server{Addr: ":80", Handler: mux, ReadHeaderTimeout: 10 * time.Second}

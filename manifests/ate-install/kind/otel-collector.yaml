@@ -103,9 +103,15 @@ data:
           receivers: [otlp]
           processors: [batch]
           exporters: [otlp/jaeger, debug]
+        # Actor metrics arrive as delta: ateom's relay requires that temporality
+        # of every actor, since a running total has no meaning on a series that
+        # passes between actors (docs/observability.md, the actor telemetry
+        # relay). The Prometheus exporter drops delta sums, so the conversion
+        # has to happen here, as the managed collector does on GKE. Platform
+        # components export cumulative and pass through the processor unchanged.
         metrics:
           receivers: [otlp]
-          processors: [batch]
+          processors: [deltatocumulative, batch]
           exporters: [prometheus, debug]
 
         # Every ate event, plus any workload that sends OTLP logs. debug is the

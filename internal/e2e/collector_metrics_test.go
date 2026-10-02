@@ -144,6 +144,11 @@ func TestTargetInfoLabel(t *testing.T) {
 		{"other resource attributes still readable", sampleTargetInfo, "atelet", "k8s_pod_name", "atelet-abc"},
 		{"a non-target_info series is never matched", sampleTargetInfo, "atelet", "ate_workerpool_name", ""},
 		{"empty scrape", "", "atelet", "k8s_node_name", ""},
+		// ate_atespace is the tail of ate_template_atespace; a label lookup
+		// must not read one as the other.
+		{"a label that is the suffix of another is not matched", `target_info{ate_template_atespace="team-a",job="team-a/crawler"} 1`, "team-a/crawler", "ate_atespace", ""},
+		{"the longer label itself is still read", `target_info{ate_template_atespace="team-a",job="team-a/crawler"} 1`, "team-a/crawler", "ate_template_atespace", "team-a"},
+		{"a label first in the set is read", `target_info{ate_atespace="team-a",job="team-a/crawler"} 1`, "team-a/crawler", "ate_atespace", "team-a"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

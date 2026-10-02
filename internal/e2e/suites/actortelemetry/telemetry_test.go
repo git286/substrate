@@ -28,12 +28,31 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
-// otelStatus mirrors the probe's /otel payload.
+// otelStatus mirrors the probe's /otel payload: one tally set per exporter
+// family, gRPC and HTTP/protobuf, both pointed at the same endpoint.
 type otelStatus struct {
-	Endpoint string       `json:"endpoint"`
-	Traces   signalStatus `json:"traces"`
-	Metrics  signalStatus `json:"metrics"`
-	Logs     signalStatus `json:"logs"`
+	Endpoint string         `json:"endpoint"`
+	GRPC     protocolStatus `json:"grpc"`
+	HTTP     protocolStatus `json:"http"`
+}
+
+type protocolStatus struct {
+	Traces  signalStatus `json:"traces"`
+	Metrics signalStatus `json:"metrics"`
+	Logs    signalStatus `json:"logs"`
+}
+
+func (p protocolStatus) signals() map[string]signalStatus {
+	return map[string]signalStatus{"traces": p.Traces, "metrics": p.Metrics, "logs": p.Logs}
+}
+
+func (p protocolStatus) attemptedAll() bool {
+	for _, s := range p.signals() {
+		if s.Exports+s.Failures == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type signalStatus struct {
@@ -79,13 +98,16 @@ func TestActorTelemetryIsRelayed(t *testing.T) {
 	for _, name := range actors {
 		t.Run(name, func(t *testing.T) {
 			status := awaitExports(t, ctx, rc, atespace, name)
-			t.Logf("%s exports: traces %+v, metrics %+v, logs %+v", name, status.Traces, status.Metrics, status.Logs)
+			t.Logf("%s gRPC exports: traces %+v, metrics %+v, logs %+v", name, status.GRPC.Traces, status.GRPC.Metrics, status.GRPC.Logs)
+			t.Logf("%s HTTP exports: traces %+v, metrics %+v, logs %+v", name, status.HTTP.Traces, status.HTTP.Metrics, status.HTTP.Logs)
 			if !strings.Contains(status.Endpoint, "169.254.17.1:4317") {
 				t.Errorf("the actor's OTEL_EXPORTER_OTLP_ENDPOINT is %q, want the sandbox gateway; the platform default did not reach the container env", status.Endpoint)
 			}
-			for signal, s := range map[string]signalStatus{"traces": status.Traces, "metrics": status.Metrics, "logs": status.Logs} {
-				if s.Failures != 0 {
-					t.Errorf("%s: %d of %d exports failed, last error %q; every export must be acknowledged through the relay", signal, s.Failures, s.Failures+s.Exports, s.LastError)
+			for protocol, p := range map[string]protocolStatus{"gRPC": status.GRPC, "HTTP/protobuf": status.HTTP} {
+				for signal, s := range p.signals() {
+					if s.Failures != 0 {
+						t.Errorf("%s %s: %d of %d exports failed, last error %q; every export must be acknowledged through the relay, whichever protocol the SDK speaks at the one endpoint the platform names", protocol, signal, s.Failures, s.Failures+s.Exports, s.LastError)
+					}
 				}
 			}
 		})
@@ -95,11 +117,14 @@ func TestActorTelemetryIsRelayed(t *testing.T) {
 		t.Logf("%s=false: the collector's view is not asserted on this cluster; the exporters' acknowledgements above cover the path to it", "E2E_COLLECTOR_SCRAPE")
 		return
 	}
-	assertCollectorView(t, ctx, len(actors))
+	// The relay sets service.namespace to the atespace, and the Prometheus
+	// exporter renders job as namespace/name. That slash is also what keeps an
+	// actor's job from ever colliding with a system component's bare name.
+	assertCollectorView(t, ctx, atespace+"/"+e2e.OTelProbeName, len(actors))
 }
 
-// awaitExports polls the probe until every signal has at least one export,
-// acknowledged or not, and returns the status. The metric reader's interval
+// awaitExports polls the probe until every signal of both exporter families
+// has at least one export, acknowledged or not, and returns the status. The metric reader's interval
 // is the slowest of the three; the platform sets it to five seconds.
 func awaitExports(t *testing.T, ctx context.Context, rc *e2e.RouterClient, atespace, name string) otelStatus {
 	t.Helper()
@@ -107,9 +132,7 @@ func awaitExports(t *testing.T, ctx context.Context, rc *e2e.RouterClient, atesp
 	var last otelStatus
 	for time.Now().Before(deadline) {
 		last = probeStatus(t, ctx, rc, atespace, name)
-		if all := last.Traces.Exports+last.Traces.Failures > 0 &&
-			last.Metrics.Exports+last.Metrics.Failures > 0 &&
-			last.Logs.Exports+last.Logs.Failures > 0; all {
+		if last.GRPC.attemptedAll() && last.HTTP.attemptedAll() {
 			return last
 		}
 		time.Sleep(2 * time.Second)
@@ -138,7 +161,7 @@ func probeStatus(t *testing.T, ctx context.Context, rc *e2e.RouterClient, atespa
 
 // assertCollectorView reads the kind collector's Prometheus surface. The
 // resource attributes land on target_info, one series per (job, instance).
-func assertCollectorView(t *testing.T, ctx context.Context, wantInstances int) {
+func assertCollectorView(t *testing.T, ctx context.Context, job string, wantInstances int) {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	var scrape string
@@ -149,29 +172,47 @@ func assertCollectorView(t *testing.T, ctx context.Context, wantInstances int) {
 		if err != nil {
 			t.Fatalf("ScrapeCollectorMetrics: %v", err)
 		}
-		instances = targetInfoInstances(scrape, e2e.OTelProbeName)
+		instances = targetInfoInstances(scrape, job)
 		if len(instances) >= wantInstances {
 			break
 		}
 		time.Sleep(3 * time.Second)
 	}
 	if len(instances) != wantInstances {
-		t.Fatalf("collector holds %d instance(s) of service %q (%v), want %d: each live actor is its own writer", len(instances), e2e.OTelProbeName, instances, wantInstances)
+		t.Fatalf("collector holds %d instance(s) of job %q (%v), want %d: each live actor is its own writer", len(instances), job, instances, wantInstances)
 	}
 	if e2e.CollectorHasService(scrape, forgedService) {
 		t.Errorf("collector holds telemetry from service %q; the probe's forged identity reached storage", forgedService)
 	}
-	if got := e2e.TargetInfoLabel(scrape, e2e.OTelProbeName, "ate_telemetry_plane"); got != "actor" {
+	if got := e2e.TargetInfoLabel(scrape, job, "ate_telemetry_plane"); got != "actor" {
 		t.Errorf("target_info ate_telemetry_plane = %q, want actor", got)
 	}
 	for _, forbidden := range []string{"ate_actor_uid", "ate_actor_name", "ate_atespace"} {
-		if got := e2e.TargetInfoLabel(scrape, e2e.OTelProbeName, forbidden); got != "" {
+		if got := e2e.TargetInfoLabel(scrape, job, forbidden); got != "" {
 			t.Errorf("target_info carries %s=%q; actor identity is never a metric label", forbidden, got)
 		}
 	}
-	if got := e2e.TargetInfoLabel(scrape, e2e.OTelProbeName, "probe_kept"); got != "yes" {
+	if got := e2e.TargetInfoLabel(scrape, job, "probe_kept"); got != "yes" {
 		t.Errorf("target_info probe_kept = %q, want the probe's own attribute kept", got)
 	}
+	// Both exporter families' counters arrive as delta and must come out of
+	// the collector as cumulative series, one per actor.
+	for _, metric := range []string{"otelprobe_ticks_grpc_total", "otelprobe_ticks_http_total"} {
+		if got := seriesForJob(scrape, metric, job); got != wantInstances {
+			t.Errorf("collector exposes %d series of %s for job %q, want %d (one per actor); delta metrics must be converted, not dropped", got, metric, job, wantInstances)
+		}
+	}
+}
+
+// seriesForJob counts the exposition lines of metric that carry job.
+func seriesForJob(scrape, metric, job string) int {
+	n := 0
+	for _, line := range strings.Split(scrape, "\n") {
+		if strings.HasPrefix(line, metric+"{") && strings.Contains(line, `job="`+job+`"`) {
+			n++
+		}
+	}
+	return n
 }
 
 // targetInfoInstances returns the distinct instance labels of a service's
