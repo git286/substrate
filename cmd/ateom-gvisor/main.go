@@ -36,6 +36,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/actorlock"
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/apierror"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomcapacity"
 	"github.com/agent-substrate/substrate/internal/ateomcgroup"
@@ -216,7 +217,8 @@ func do(ctx context.Context) error {
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
+		// Actor identity first, so the "Handle RPC" record carries it too.
+		grpc.ChainUnaryInterceptor(ateinterceptors.ActorLogContextUnaryInterceptor, ateinterceptors.InternalServerUnaryInterceptor),
 	)
 	ateompb.RegisterAteomServer(svr, ateomService)
 	reflection.Register(svr)
@@ -389,12 +391,14 @@ func (s *AteomService) gracefulShutdown(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	for _, session := range sessions {
+		// Shutdown stops every actor at once: say whose container each record is about.
+		actorCtx := contextlogging.WithAttrs(ctx, slog.String(string(ateattr.ActorUIDKey), session.rcmd.actorUID))
 		for _, name := range session.containers {
 			wg.Add(1)
 			go func(rcmd *runsc, containerName string) {
 				defer wg.Done()
-				if err := killContainer(ctx, rcmd, containerName, deadline); err != nil {
-					slog.WarnContext(ctx, "Failed to kill container during shutdown", slog.String("container", containerName), slog.Any("err", err))
+				if err := killContainer(actorCtx, rcmd, containerName, deadline); err != nil {
+					slog.WarnContext(actorCtx, "Failed to kill container during shutdown", slog.String("container", containerName), slog.Any("err", err))
 				}
 			}(session.rcmd, name)
 		}
@@ -586,10 +590,10 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		return nil, fmt.Errorf("while composing pause rootfs: %w", err)
 	}
 	containersToDelete = append(containersToDelete, ocispec.PauseContainer)
-	if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
+	if err := rcmd.cmdCreate(ctx, nil, ocispec.PauseContainer, nil); err != nil {
 		return nil, fmt.Errorf("while creating pause container: %w", err)
 	}
-	if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
+	if err := rcmd.cmdStart(ctx, nil, ocispec.PauseContainer); err != nil {
 		return nil, fmt.Errorf("while starting pause container: %w", err)
 	}
 
@@ -887,19 +891,19 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_DATA:
 		// Create and start pause container (cold boot with durable-dir volumes restored)
 		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
-		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
+		if err := rcmd.cmdCreate(ctx, nil, ocispec.PauseContainer, nil); err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
-		if err := rcmd.cmdStart(ctx, os.Stdout, ocispec.PauseContainer); err != nil {
+		if err := rcmd.cmdStart(ctx, nil, ocispec.PauseContainer); err != nil {
 			return nil, fmt.Errorf("while starting pause container: %w", err)
 		}
 	case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 		// Create and restore pause container
 		containersToDelete = append(containersToDelete, ocispec.PauseContainer)
-		if err := rcmd.cmdCreate(ctx, os.Stdout, ocispec.PauseContainer, nil); err != nil {
+		if err := rcmd.cmdCreate(ctx, nil, ocispec.PauseContainer, nil); err != nil {
 			return nil, fmt.Errorf("while creating pause container: %w", err)
 		}
-		if err := rcmd.cmdRestore(ctx, os.Stdout, ocispec.PauseContainer, checkpointDir); err != nil {
+		if err := rcmd.cmdRestore(ctx, nil, ocispec.PauseContainer, checkpointDir); err != nil {
 			return nil, fmt.Errorf("while restoring pause container: %w", err)
 		}
 	default:

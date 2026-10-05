@@ -18,11 +18,27 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 )
+
+type attrsKey struct{}
+
+// WithAttrs returns a context whose records, logged through a ContextHandler,
+// carry attrs. Use it for what a whole operation is about, such as the actor an
+// RPC acts on, so every record the operation writes says so without each call
+// site repeating it. Attrs added to an already-annotated context follow the
+// earlier ones.
+func WithAttrs(ctx context.Context, attrs ...slog.Attr) context.Context {
+	if len(attrs) == 0 {
+		return ctx
+	}
+	prev, _ := ctx.Value(attrsKey{}).([]slog.Attr)
+	return context.WithValue(ctx, attrsKey{}, append(slices.Clip(prev), attrs...))
+}
 
 type ContextHandler struct {
 	internal slog.Handler
@@ -42,7 +58,25 @@ func (h *ContextHandler) Enabled(ctx context.Context, lvl slog.Level) bool {
 // spec fixes for non-OTLP log formats, so a collector can lift them onto the log
 // record's own trace fields. Gated on the whole span context being valid: a trace
 // ID without a span ID names a request but not the operation within it.
+//
+// It also adds the attrs WithAttrs put on ctx, except those whose key the record
+// already has: the call site's value is the more specific one, and a duplicate
+// key would be ambiguous to a reader.
 func (h *ContextHandler) Handle(ctx context.Context, rec slog.Record) error {
+	if attrs, _ := ctx.Value(attrsKey{}).([]slog.Attr); len(attrs) > 0 {
+		rec = rec.Clone()
+		have := make(map[string]bool, rec.NumAttrs())
+		rec.Attrs(func(a slog.Attr) bool {
+			have[a.Key] = true
+			return true
+		})
+		for _, a := range attrs {
+			if !have[a.Key] {
+				have[a.Key] = true
+				rec.AddAttrs(a)
+			}
+		}
+	}
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
 		rec.AddAttrs(
 			slog.String(ateattr.LogTraceIDField, sc.TraceID().String()),

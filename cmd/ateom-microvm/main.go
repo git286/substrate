@@ -225,7 +225,8 @@ func do(ctx context.Context) error {
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(ateinterceptors.InternalServerUnaryInterceptor),
+		// Actor identity first, so the "Handle RPC" record carries it too.
+		grpc.ChainUnaryInterceptor(ateinterceptors.ActorLogContextUnaryInterceptor, ateinterceptors.InternalServerUnaryInterceptor),
 	)
 	ateompb.RegisterAteomServer(svr, ateomService)
 	reflection.Register(svr)

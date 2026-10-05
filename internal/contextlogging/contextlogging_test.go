@@ -133,3 +133,46 @@ func TestHandleUngroupedKeepsTraceFieldsTopLevel(t *testing.T) {
 		t.Errorf("%s = %v, want %q at the top level, got record %v", ateattr.LogTraceIDField, rec[ateattr.LogTraceIDField], testTraceID, rec)
 	}
 }
+
+func TestHandleAddsContextAttrs(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&buf, nil)))
+	ctx := WithAttrs(context.Background(), slog.String("ate.actor.uid", "uid-1"), slog.String("ate.actor.name", "from-ctx"))
+	ctx = WithAttrs(ctx, slog.String("phase", "boot"))
+	logger.InfoContext(ctx, "something happened", slog.String("ate.actor.name", "from-call"))
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("failed to parse log record %q: %v", buf.String(), err)
+	}
+	for field, want := range map[string]string{
+		"ate.actor.uid":  "uid-1",
+		"ate.actor.name": "from-call",
+		"phase":          "boot",
+	} {
+		if got := rec[field]; got != want {
+			t.Errorf("%s = %v, want %q", field, got, want)
+		}
+	}
+	if n := bytes.Count(buf.Bytes(), []byte(`"ate.actor.name"`)); n != 1 {
+		t.Errorf("ate.actor.name appears %d times in %s, want once", n, buf.String())
+	}
+}
+
+// TestWithAttrsDoesNotLeakIntoSiblings guards the append in WithAttrs: two
+// contexts derived from one parent must not share a backing array.
+func TestWithAttrsDoesNotLeakIntoSiblings(t *testing.T) {
+	parent := WithAttrs(context.Background(), slog.String("a", "1"), slog.String("b", "2"))
+	first := WithAttrs(parent, slog.String("c", "first"))
+	_ = WithAttrs(parent, slog.String("c", "second"))
+
+	var buf bytes.Buffer
+	slog.New(NewHandler(slog.NewJSONHandler(&buf, nil))).InfoContext(first, "x")
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("failed to parse log record %q: %v", buf.String(), err)
+	}
+	if rec["c"] != "first" {
+		t.Errorf("c = %v, want %q", rec["c"], "first")
+	}
+}

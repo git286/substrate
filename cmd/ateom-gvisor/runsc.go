@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -75,6 +74,17 @@ func (r *runsc) shapeSpec(containerName string) error {
 	return ocispec.Save(bundle, spec)
 }
 
+// stdio returns out for an invocation whose descriptors are an application
+// container's own stdio, or, when out is nil, runscOutput's pipe, so runsc's
+// own logging is attributed to the actor. Call the returned func once the
+// invocation has returned.
+func (r *runsc) stdio(ctx context.Context, out io.Writer, command, containerName string) (io.Writer, func()) {
+	if out != nil {
+		return out, func() {}
+	}
+	return runscOutput(ctx, r.actorUID, command, containerName)
+}
+
 func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName string, additionalArgs []string) error {
 	slog.InfoContext(ctx, "About to run runsc create", slog.String("container", containerName))
 
@@ -109,6 +119,8 @@ func (r *runsc) cmdCreate(ctx context.Context, out io.Writer, containerName stri
 		r.path,
 		args...,
 	)
+	out, done := r.stdio(ctx, out, "create", containerName)
+	defer done()
 	cmd.Stdout = out
 	cmd.Stderr = out
 
@@ -136,6 +148,8 @@ func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName strin
 	}
 	startArgs = append(startArgs, "start", containerName)
 	cmd := exec.CommandContext(ctx, r.path, startArgs...)
+	out, done := r.stdio(ctx, out, "start", containerName)
+	defer done()
 	cmd.Stdout = out
 	cmd.Stderr = out
 
@@ -165,8 +179,10 @@ func (r *runsc) cmdCheckpoint(ctx context.Context, containerName, checkpointPath
 		"-image-path", checkpointPath,
 		containerName, // Name of the container
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "checkpoint", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	err := reaper.RunCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("while running `runsc checkpoint`: %w", err)
@@ -202,8 +218,10 @@ func (r *runsc) cmdFsCheckpoint(ctx context.Context, containerName, checkpointPa
 		r.path,
 		args...,
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "fscheckpoint", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	err := reaper.RunCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("while running `runsc fscheckpoint`: %w", err)
@@ -228,8 +246,10 @@ func (r *runsc) cmdPause(ctx context.Context, containerName string) error {
 	slog.InfoContext(ctx, "About to run runsc pause", slog.String("container", containerName))
 
 	cmd := exec.CommandContext(ctx, r.path, r.pauseArgs(containerName)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "pause", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := reaper.RunCommand(cmd); err != nil {
 		return fmt.Errorf("while running `runsc pause`: %w", err)
 	}
@@ -253,8 +273,10 @@ func (r *runsc) cmdResume(ctx context.Context, containerName string) error {
 	slog.InfoContext(ctx, "About to run runsc resume", slog.String("container", containerName))
 
 	cmd := exec.CommandContext(ctx, r.path, r.resumeArgs(containerName)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "resume", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := reaper.RunCommand(cmd); err != nil {
 		return fmt.Errorf("while running `runsc resume`: %w", err)
 	}
@@ -295,6 +317,8 @@ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, ch
 	}
 
 	cmd := exec.CommandContext(ctx, r.path, r.restoreArgs(containerName, checkpointPath)...)
+	out, done := r.stdio(ctx, out, "restore", containerName)
+	defer done()
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := reaper.RunCommand(cmd); err != nil {
@@ -315,8 +339,10 @@ func (r *runsc) cmdDelete(ctx context.Context, containerName string) error {
 		"-force",
 		containerName,
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "delete", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	err := reaper.RunCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("while running `runsc delete`: %w", err)
@@ -334,8 +360,11 @@ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 		"state",
 		containerName,
 	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Stdout is the container's state document; callers want only the exit
+	// status, so leave it on /dev/null rather than log it line by line.
+	out, done := runscOutput(ctx, r.actorUID, "state", containerName)
+	defer done()
+	cmd.Stderr = out
 	if err := reaper.RunCommand(cmd); err != nil {
 		return fmt.Errorf("while running `runsc state`: %w", err)
 	}
@@ -355,7 +384,9 @@ func (r *runsc) cmdList(ctx context.Context) ([]string, error) {
 	)
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
+	logOut, done := runscOutput(ctx, r.actorUID, "list", "")
+	defer done()
+	cmd.Stderr = logOut
 	if err := reaper.RunCommand(cmd); err != nil {
 		return nil, fmt.Errorf("while running `runsc list`: %w", err)
 	}
@@ -381,8 +412,10 @@ func (r *runsc) cmdKill(ctx context.Context, containerName, signal string) error
 	slog.InfoContext(ctx, "About to run runsc kill", slog.String("container", containerName), slog.String("signal", signal))
 
 	cmd := exec.CommandContext(ctx, r.path, r.killArgs(containerName, signal)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "kill", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := reaper.RunCommand(cmd); err != nil {
 		return fmt.Errorf("while running `runsc kill`: %w", err)
 	}
@@ -411,8 +444,10 @@ func (r *runsc) cmdWait(ctx context.Context, containerName string) error {
 	slog.InfoContext(ctx, "About to run runsc wait", slog.String("container", containerName))
 
 	cmd := exec.CommandContext(ctx, r.path, r.waitArgs(containerName)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	out, done := runscOutput(ctx, r.actorUID, "wait", containerName)
+	defer done()
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
 		// Running outside the reaper means the reaper can collect this process
 		// first, leaving os/exec nothing to wait for. `runsc wait` only exits
