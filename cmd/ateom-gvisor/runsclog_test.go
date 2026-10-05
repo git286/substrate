@@ -20,7 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -122,5 +125,61 @@ func TestRunscOutputDoesNotWaitForInheritors(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("command did not return while a background child held its output")
+	}
+}
+
+// panicHandler stands in for a broken log handler.
+type panicHandler struct{ slog.Handler }
+
+func (panicHandler) Enabled(context.Context, slog.Level) bool  { return true }
+func (panicHandler) Handle(context.Context, slog.Record) error { panic("handler bug") }
+
+// TestLogRunscOutputKeepsDrainingAfterPanic pins the SIGPIPE guard: a sandbox
+// holding the write end must be able to keep writing however logging fails,
+// and the panic must not escape the goroutine.
+func TestLogRunscOutputKeepsDrainingAfterPanic(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer pr.Close()
+		logRunscOutput(context.Background(), slog.New(panicHandler{}), pr, nil)
+	}()
+	// Well past the pipe buffer, so the writes only finish if something reads.
+	payload := bytes.Repeat([]byte("I1005 15:09:31.000000 1 x.go:1] line\n"), 1<<15)
+	if _, err := pw.Write(payload); err != nil {
+		t.Fatalf("write after logging panicked: %v", err)
+	}
+	pw.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reader did not finish after the writer closed")
+	}
+}
+
+// errThenData fails its first read, then serves data: the reader must not stop
+// at the error and leave the data unread.
+type errThenData struct {
+	failed bool
+	data   *strings.Reader
+}
+
+func (r *errThenData) Read(p []byte) (int, error) {
+	if !r.failed {
+		r.failed = true
+		return 0, errors.New("transient")
+	}
+	return r.data.Read(p)
+}
+
+func TestLogRunscOutputDrainsAfterReadError(t *testing.T) {
+	r := &errThenData{data: strings.NewReader(strings.Repeat("x\n", 1000))}
+	logRunscOutput(context.Background(), slog.New(slog.NewJSONHandler(io.Discard, nil)), r, nil)
+	if r.data.Len() != 0 {
+		t.Errorf("%d bytes left unread after a read error, want all drained", r.data.Len())
 	}
 }

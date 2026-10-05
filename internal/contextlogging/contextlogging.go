@@ -64,15 +64,8 @@ func (h *ContextHandler) Enabled(ctx context.Context, lvl slog.Level) bool {
 // key would be ambiguous to a reader.
 func (h *ContextHandler) Handle(ctx context.Context, rec slog.Record) error {
 	if attrs, _ := ctx.Value(attrsKey{}).([]slog.Attr); len(attrs) > 0 {
-		rec = rec.Clone()
-		have := make(map[string]bool, rec.NumAttrs())
-		rec.Attrs(func(a slog.Attr) bool {
-			have[a.Key] = true
-			return true
-		})
 		for _, a := range attrs {
-			if !have[a.Key] {
-				have[a.Key] = true
+			if !hasAttr(rec, a.Key) {
 				rec.AddAttrs(a)
 			}
 		}
@@ -86,6 +79,17 @@ func (h *ContextHandler) Handle(ctx context.Context, rec slog.Record) error {
 	}
 
 	return h.internal.Handle(ctx, rec)
+}
+
+// hasAttr reports whether rec has an attr keyed key. A scan rather than a set:
+// records hold a handful of attrs, and this runs on every one logged.
+func hasAttr(rec slog.Record, key string) bool {
+	found := false
+	rec.Attrs(func(a slog.Attr) bool {
+		found = a.Key == key
+		return !found
+	})
+	return found
 }
 
 func (h *ContextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {

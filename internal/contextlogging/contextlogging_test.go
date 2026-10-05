@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"testing"
 
@@ -174,5 +175,27 @@ func TestWithAttrsDoesNotLeakIntoSiblings(t *testing.T) {
 	}
 	if rec["c"] != "first" {
 		t.Errorf("c = %v, want %q", rec["c"], "first")
+	}
+}
+
+// BenchmarkHandle measures what WithAttrs adds to a record: every component
+// logs through this handler, most with no attrs on the context.
+func BenchmarkHandle(b *testing.B) {
+	logger := slog.New(NewHandler(slog.NewJSONHandler(io.Discard, nil)))
+	plain := context.Background()
+	withAttrs := WithAttrs(plain,
+		slog.String("ate.atespace", "space"), slog.String("ate.actor.name", "a1"),
+		slog.String("ate.actor.uid", "uid-1"), slog.String("ate.template.atespace", "tspace"),
+		slog.String("ate.template.name", "tmpl"))
+	for _, bc := range []struct {
+		name string
+		ctx  context.Context
+	}{{"no_ctx_attrs", plain}, {"five_ctx_attrs", withAttrs}} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				logger.InfoContext(bc.ctx, "About to run runsc create", slog.String("container", "_pause"))
+			}
+		})
 	}
 }

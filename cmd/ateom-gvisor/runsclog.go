@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -71,7 +72,21 @@ func runscOutput(ctx context.Context, actorUID, command, container string) (*os.
 }
 
 // logRunscOutput logs each line read from r to logger until EOF.
+//
+// Whatever happens, it reads r to the end. The sandbox a root-container create
+// or restore starts keeps the pipe's write end as its stdout and stderr, and a
+// Go process writing to fd 1 or 2 of a pipe nobody reads is killed by SIGPIPE:
+// a reader that stopped early would take the actor down with it. So a read
+// error drains the rest unlogged, and a panic while logging is recovered
+// rather than allowed to end this goroutine, which would also end ateom and
+// every actor on the worker.
 func logRunscOutput(ctx context.Context, logger *slog.Logger, r io.Reader, attrs []slog.Attr) {
+	defer func() {
+		if p := recover(); p != nil {
+			fmt.Fprintf(os.Stderr, "ateom: logging runsc output panicked; draining the rest unlogged: %v\n", p)
+		}
+		_, _ = io.Copy(io.Discard, r)
+	}()
 	br := bufio.NewReader(r)
 	var line []byte
 	for {
@@ -89,7 +104,7 @@ func logRunscOutput(ctx context.Context, logger *slog.Logger, r io.Reader, attrs
 		line = line[:0]
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
-				logger.DebugContext(ctx, "Stopped reading runsc output", slog.Any("err", err))
+				logger.DebugContext(ctx, "Stopped logging runsc output; draining the rest", slog.Any("err", err))
 			}
 			return
 		}
