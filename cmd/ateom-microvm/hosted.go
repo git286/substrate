@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
@@ -49,6 +50,8 @@ type hostedActor struct {
 	// usage is this activation's epoch, CPU baseline, and latest sample.
 	// Immutable after admission.
 	usage *ateomstats.Activation
+	// deadReported keeps the usage sweep to one warning per activation.
+	deadReported atomic.Bool
 }
 
 // admitActor reserves capacity before network setup. An actor that is already
@@ -209,6 +212,13 @@ func (s *AteomService) setGuestStats(actorUID string, guest *guestStatsTarget) {
 	if hosted, ok := s.actors[actorUID]; ok {
 		hosted.guest = guest
 	}
+}
+
+// vmOf is h's live micro-VM, or nil.
+func (s *AteomService) vmOf(h *hostedActor) *runningActor {
+	s.actorsMu.RLock()
+	defer s.actorsMu.RUnlock()
+	return h.vm
 }
 
 // guestOf is h's stats target, or nil.

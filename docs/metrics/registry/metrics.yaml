@@ -281,8 +281,10 @@ groups:
         note: >
           Logs only. It is only ever recorded beside actor identity, which no
           metric may carry. ateom-gvisor sets it on the record it writes when a
-          hosted actor's sandbox has no process left. A leaf left behind by an
-          earlier activation of the same actor carries its count forward.
+          hosted actor's sandbox has no process left, and ateom-microvm on the
+          record it writes when a hosted actor's VMM has exited. A leaf left
+          behind by an earlier activation of the same actor carries its count
+          forward.
         examples: [0, 3]
 
   - id: registry.ate.snapshot

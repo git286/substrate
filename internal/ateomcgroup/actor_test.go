@@ -105,3 +105,43 @@ func TestNilActorLeaf(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestActorLeafOOMKills(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		events  *string // nil: no memory.events
+		want    uint64
+		wantOK  bool
+		wantErr bool
+	}{
+		{name: "after an OOM kill", events: ptr("low 0\nhigh 0\nmax 12\noom 4\noom_kill 3\noom_group_kill 0\n"), want: 3, wantOK: true},
+		{name: "no OOM yet", events: ptr("oom 0\noom_kill 0\n"), wantOK: true},
+		{name: "no memory controller", events: nil},
+		{name: "no oom_kill line", events: ptr("oom 0\n")},
+		{name: "bad count", events: ptr("oom_kill x\n"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "uid-a"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.events != nil {
+				if err := os.WriteFile(filepath.Join(root, "uid-a", "memory.events"), []byte(*tc.events), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, ok, err := actorLeafOOMKills(root, "uid-a")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("actorLeafOOMKills() error = %v, want error %v", err, tc.wantErr)
+			}
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("actorLeafOOMKills() = %d, %v, want %d, %v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+	if _, _, err := actorLeafOOMKills(t.TempDir(), "../escape"); err == nil {
+		t.Error("actorLeafOOMKills accepted an unsafe name")
+	}
+}
+
+func ptr(s string) *string { return &s }

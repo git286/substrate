@@ -193,7 +193,8 @@ const (
 
 // SandboxOOMKillsKey is memory.events' oom_kill for the sandbox cgroup leaf, on
 // the record ateom-gvisor writes when a hosted actor's sandbox has no process
-// left. Logs only: it is only ever recorded beside actor identity.
+// left, and on the one ateom-microvm writes when its VMM has exited. Logs only:
+// it is only ever recorded beside actor identity.
 const SandboxOOMKillsKey = attribute.Key("ate.sandbox.oom_kills")
 
 // Values for StatsKindKey. An initial or final sample brackets an activation; a

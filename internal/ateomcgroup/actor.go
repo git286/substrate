@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -140,6 +141,40 @@ func KillLeafUnder(ctx context.Context, root, name string) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// ActorLeafOOMKills reads oom_kill from the actor leaf's memory.events: how many
+// of its processes the kernel's OOM killer has killed over the leaf's lifetime.
+// ok is false when the leaf has no memory.events, as when the memory controller
+// was not delegated.
+func ActorLeafOOMKills(actorUID string) (n uint64, ok bool, err error) {
+	return actorLeafOOMKills(Root, actorUID)
+}
+
+func actorLeafOOMKills(root, actorUID string) (uint64, bool, error) {
+	path, err := actorLeafPath(root, actorUID)
+	if err != nil {
+		return 0, false, err
+	}
+	b, err := os.ReadFile(filepath.Join(path, "memory.events"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("while reading memory.events of cgroup %q: %w", path, err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 || f[0] != "oom_kill" {
+			continue
+		}
+		n, err := strconv.ParseUint(f[1], 10, 64)
+		if err != nil {
+			return 0, false, fmt.Errorf("while parsing oom_kill of cgroup %q: %w", path, err)
+		}
+		return n, true, nil
+	}
+	return 0, false, nil
 }
 
 // RemoveActorLeaf deletes the actor's leaf. Its processes must have exited.

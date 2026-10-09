@@ -21,14 +21,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime/debug"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/agentstats"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
 	"github.com/agent-substrate/substrate/internal/apierror"
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/ateomcgroup"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
@@ -210,7 +213,83 @@ func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor) {
 	if s.lookupActor(h.attribution.UID) != h {
 		return
 	}
+	s.warnDeadVMM(ctx, h)
 	h.usage.Periodic(sample, func() { s.usage.Emit(ctx, ateattr.StatsKindPeriodic, sample) })
+}
+
+// warnDeadVMM logs, once per activation, that h's cloud-hypervisor has exited
+// while the actor is still hosted. Nothing else notices this today: the actor
+// stays RUNNING and its samples read as pending (#2211).
+//
+// The VMM is checked rather than the actor's cgroup, as ateom-gvisor does,
+// because virtiofsd shares the leaf and outlives the VMM. The OOM killer usually
+// picks the VMM, whose guest RAM makes it the largest process, so the leaf is
+// still populated after an OOM kill.
+//
+// A lifecycle RPC kills the VMM on purpose when it tears the actor down, and
+// holds the actor's lock while it does, so a busy actor is skipped. The VMM was
+// checked before the lock was, and h is looked up again after, so a teardown
+// that starts or finishes in between is never reported.
+//
+// oom_kill counts over the leaf's lifetime. A leaf left behind by an earlier
+// activation of the same actor carries its count forward. It is left out when
+// it cannot be read, rather than reported as 0.
+func (s *AteomService) warnDeadVMM(ctx context.Context, h *hostedActor) {
+	if h.deadReported.Load() {
+		return
+	}
+	vm := s.vmOf(h)
+	if vm == nil {
+		return // still booting or restoring
+	}
+	exited := s.vmmExited
+	if exited == nil {
+		exited = vmmProcessExited
+	}
+	if !exited(vm) {
+		return
+	}
+	if s.locks.Busy(h.attribution.UID) || s.lookupActor(h.attribution.UID) != h {
+		return
+	}
+	if !h.deadReported.CompareAndSwap(false, true) {
+		return
+	}
+	attrs := ateattr.ActorLogAttrs(h.attribution)
+	if n, ok := s.oomKills(ctx, h); ok {
+		attrs = append(attrs, slog.Uint64(string(ateattr.SandboxOOMKillsKey), n))
+	}
+	slog.LogAttrs(ctx, slog.LevelWarn, "Sandbox VMM exited while the actor is hosted", attrs...)
+}
+
+// vmmProcessExited reports whether vm's cloud-hypervisor is gone. The child
+// reaper collects a detached VMM's exit status, so os/exec never sees the exit;
+// a signal 0 does, once the reaper has collected it. Until then the zombie reads
+// as running, which delays the warning by one sweep at most.
+func vmmProcessExited(vm *runningActor) bool {
+	if vm.chCmd == nil || vm.chCmd.Process == nil {
+		return false
+	}
+	return errors.Is(vm.chCmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone)
+}
+
+// oomKills is oom_kill of h's actor leaf. ok is false when the worker has no
+// actor leaves or the count cannot be read.
+func (s *AteomService) oomKills(ctx context.Context, h *hostedActor) (uint64, bool) {
+	read := s.readOOMKills
+	if read == nil {
+		if !s.actorCgroups {
+			return 0, false
+		}
+		read = ateomcgroup.ActorLeafOOMKills
+	}
+	n, ok, err := read(h.attribution.UID)
+	if err != nil {
+		attrs := append(ateattr.ActorLogAttrs(h.attribution), slog.Any("err", err))
+		slog.LogAttrs(ctx, slog.LevelWarn, "Failed to read the actor's OOM kill count", attrs...)
+		return 0, false
+	}
+	return n, ok
 }
 
 // measureGuest reads h's guest as a reading of its activation.

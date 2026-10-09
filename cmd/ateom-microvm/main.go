@@ -378,6 +378,11 @@ type AteomService struct {
 	// actorCgroups is set when the worker's cgroup is delegated, so each actor's
 	// VMM and virtiofsd run in a leaf of their own.
 	actorCgroups bool
+
+	// vmmExited and readOOMKills stand in for the process check and the
+	// actor leaf read in tests. Nil uses the real ones.
+	vmmExited    func(*runningActor) bool
+	readOOMKills func(actorUID string) (uint64, bool, error)
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)
