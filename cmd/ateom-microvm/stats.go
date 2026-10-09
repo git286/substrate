@@ -221,10 +221,11 @@ func (s *AteomService) sampleHostedGuest(ctx context.Context, h *hostedActor) {
 // while the actor is still hosted. Nothing else notices this today: the actor
 // stays RUNNING and its samples read as pending (#2211).
 //
-// The VMM is checked rather than the actor's cgroup, as ateom-gvisor does,
-// because virtiofsd shares the leaf and outlives the VMM. The OOM killer usually
-// picks the VMM, whose guest RAM makes it the largest process, so the leaf is
-// still populated after an OOM kill.
+// The VMM process is checked, not whether the actor's cgroup is empty as in
+// ateom-gvisor. It is the direct signal: the leaf also holds virtiofsd, which
+// only exits after it loses the VMM, so the leaf empties later, and only if
+// virtiofsd does exit. The OOM killer picks the VMM, whose guest RAM makes it
+// the largest process in the leaf.
 //
 // A lifecycle RPC kills the VMM on purpose when it tears the actor down, and
 // holds the actor's lock while it does, so a busy actor is skipped. The VMM was

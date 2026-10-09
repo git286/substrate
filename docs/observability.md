@@ -200,7 +200,7 @@ ateom-gvisor's `Sandbox has no processes left while the actor is hosted` is a WA
 
 The actor still reports `RUNNING` after this record; nothing moves it to `CRASHED` yet ([#2211](https://github.com/agent-substrate/substrate/issues/2211)). It does not fire when an application container exits while the sentry is still up, or during a checkpoint or terminate. The count covers the life of the cgroup leaf, so a leaf left behind by an earlier activation of the same actor carries its count forward.
 
-ateom-microvm writes `Sandbox VMM exited while the actor is hosted` instead, from the same sweep, when a running actor's cloud-hypervisor process is gone: it crashed, was killed, or was OOM-killed. It checks the process, not the cgroup, because virtiofsd shares the actor's leaf and outlives the VMM. `ate.sandbox.oom_kills` is the actor leaf's `oom_kill` count, with the same caveats. It is left out when the worker has no actor leaves or the count cannot be read. An OOM inside the guest is not seen here: the guest kernel kills the process, and the VMM stays up.
+ateom-microvm writes `Sandbox VMM exited while the actor is hosted` instead, from the same sweep, when a running actor's cloud-hypervisor process is gone: it crashed, was killed, or was OOM-killed. It checks the VMM process itself. The actor's leaf also holds virtiofsd, which only exits after the VMM is gone. `ate.sandbox.oom_kills` is the actor leaf's `oom_kill` count, with the same caveats. It is left out when the worker has no actor leaves or the count cannot be read. An OOM inside the guest is not seen here: the guest kernel kills the process, and the VMM stays up.
 
 #### The same records over OTLP
 
