@@ -734,13 +734,13 @@ message Container {
   // +k8s:maxItems=64
   // +k8s:listType=atomic
   // +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
-  repeated string command = 3;
+  repeated string command = 3 [ debug_redact = true ];
 
   // +k8s:optional
   // +k8s:maxItems=64
   // +k8s:listType=atomic
   // +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
-  repeated string args = 7;
+  repeated string args = 7 [ debug_redact = true ];
 
   // +k8s:optional
   // +k8s:maxItems=32 # matches the template's env bound

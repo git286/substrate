@@ -27,8 +27,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.ate.dev/substrate/internal/ateattr"
+	"go.ate.dev/substrate/internal/proto/ateletpb"
+	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/protoredact"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -192,6 +195,35 @@ func TestHandleRedactsProtoAttrsAnywhereInTheRecord(t *testing.T) {
 	// Originals are untouched: the caller still holds the real values.
 	if resp.GetActorJwt() != token || tpl.GetContainers()[0].GetEnv()[0].GetValue() != "sk-secret" {
 		t.Fatal("handler mutated the logged message")
+	}
+}
+
+// Users put credentials on the command line (--api-key=..., sh -c
+// "TOKEN=... cmd"), so a container's argv is masked like its env everywhere
+// the RPC interceptors log it: the template in ateapi, the Run request in
+// atelet and the resolved process spec in the workers. The image stays.
+func TestHandleRedactsContainerArgv(t *testing.T) {
+	const secret = "--api-key=sk-secret"
+	for name, msg := range map[string]proto.Message{
+		"ateapi.Container": &ateapipb.Container{
+			Image: "example.com/img@sha256:abc", Command: []string{"agent"}, Args: []string{secret},
+		},
+		"atelet.Container": &ateletpb.Container{
+			Image: "example.com/img@sha256:abc", Command: []string{"agent"}, Args: []string{secret},
+		},
+		"ateworker.ContainerSpec": &ateworkerpb.ContainerSpec{
+			Args: []string{"agent", secret},
+		},
+	} {
+		var buf bytes.Buffer
+		slog.New(NewHandler(slog.NewJSONHandler(&buf, nil))).InfoContext(context.Background(), "Handle RPC", slog.Any("req", msg))
+		got := buf.String()
+		if strings.Contains(got, secret) {
+			t.Errorf("%s: log contains the argv: %s", name, got)
+		}
+		if _, ok := msg.(*ateworkerpb.ContainerSpec); !ok && !strings.Contains(got, "example.com/img@sha256:abc") {
+			t.Errorf("%s: log lost the image: %s", name, got)
+		}
 	}
 }
 

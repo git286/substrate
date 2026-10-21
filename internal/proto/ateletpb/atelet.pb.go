@@ -4278,12 +4278,12 @@ const file_atelet_proto_rawDesc = "" +
 	"\vVolumeMount\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
-	"mount_path\x18\x02 \x01(\tR\tmountPath\"\xf7\x02\n" +
+	"mount_path\x18\x02 \x01(\tR\tmountPath\"\x81\x03\n" +
 	"\tContainer\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
-	"\x05image\x18\x02 \x01(\tR\x05image\x12\x18\n" +
-	"\acommand\x18\x03 \x03(\tR\acommand\x12\x12\n" +
-	"\x04args\x18\a \x03(\tR\x04args\x12 \n" +
+	"\x05image\x18\x02 \x01(\tR\x05image\x12\x1d\n" +
+	"\acommand\x18\x03 \x03(\tB\x03\x80\x01\x01R\acommand\x12\x17\n" +
+	"\x04args\x18\a \x03(\tB\x03\x80\x01\x01R\x04args\x12 \n" +
 	"\x03env\x18\x04 \x03(\v2\x0e.atelet.EnvVarR\x03env\x126\n" +
 	"\fwakeup_probe\x18\x05 \x01(\v2\x13.atelet.WakeupProbeR\vwakeupProbe\x128\n" +
 	"\rvolume_mounts\x18\x06 \x03(\v2\x13.atelet.VolumeMountR\fvolumeMounts\x12B\n" +

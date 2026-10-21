@@ -1297,7 +1297,7 @@ message Container {
   // +k8s:maxItems=64
   // +k8s:listType=atomic
   // +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
-  repeated string command = 3;
+  repeated string command = 3 [ debug_redact = true ];
 
   // Arguments to the entrypoint; the image's CMD is used if unset (unless
   // command is set, which discards the image's CMD).
@@ -1306,7 +1306,7 @@ message Container {
   // +k8s:maxItems=64
   // +k8s:listType=atomic
   // +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
-  repeated string args = 4;
+  repeated string args = 4 [ debug_redact = true ];
 
   // Env variables to set in the container's process environment. Unlike
   // Kubernetes, $(VAR_NAME) references are NOT expanded in this field.

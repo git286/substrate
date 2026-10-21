@@ -400,10 +400,15 @@ func isDebugRedact(fd protoreflect.FieldDescriptor) bool {
 // change is reviewed as a deliberate decision about what the logs may show.
 func TestDebugRedactFieldsArePinned(t *testing.T) {
 	want := map[string]bool{
+		"ateapi.Container.args":                                     true,
+		"ateapi.Container.command":                                  true,
 		"ateapi.EnvVar.value":                                       true,
 		"ateapi.MintActorJwtResponse.actor_jwt":                     true,
 		"ateapi.MintWorkerActorJwtResponse.actor_jwt":               true,
+		"atelet.Container.args":                                     true,
+		"atelet.Container.command":                                  true,
 		"atelet.EnvVar.value":                                       true,
+		"ateworker.ContainerSpec.args":                              true,
 		"ateworker.ContainerSpec.env":                               true,
 		"credprovider.FetchSecretResponse.opaque_bytes":             true,
 		"objectstore.v1.FetchAssetRequest.asset_uri":                true,

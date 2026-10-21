@@ -336,7 +336,7 @@ message Container {
 message ContainerSpec {
   // args is the process argv, already resolved against the image's
   // ENTRYPOINT and CMD.
-  repeated string args = 1;
+  repeated string args = 1 [ debug_redact = true ];
 
   // env is the process environment as KEY=VALUE, already merged with the
   // image's ENV.

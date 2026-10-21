@@ -2088,9 +2088,9 @@ const file_ateworker_proto_rawDesc = "" +
 	"\x16external_volume_mounts\x18\x04 \x03(\v2\x16.ateworker.VolumeMountR\x14externalVolumeMounts\x12Q\n" +
 	"\x19system_info_volume_mounts\x18\x05 \x03(\v2\x16.ateworker.VolumeMountR\x16systemInfoVolumeMounts\x12F\n" +
 	"\x13image_volume_mounts\x18\x06 \x03(\v2\x16.ateworker.VolumeMountR\x11imageVolumeMounts\x12?\n" +
-	"\x0econtainer_spec\x18\a \x01(\v2\x18.ateworker.ContainerSpecR\rcontainerSpec\"\x9d\x01\n" +
-	"\rContainerSpec\x12\x12\n" +
-	"\x04args\x18\x01 \x03(\tR\x04args\x12\x15\n" +
+	"\x0econtainer_spec\x18\a \x01(\v2\x18.ateworker.ContainerSpecR\rcontainerSpec\"\xa2\x01\n" +
+	"\rContainerSpec\x12\x17\n" +
+	"\x04args\x18\x01 \x03(\tB\x03\x80\x01\x01R\x04args\x12\x15\n" +
 	"\x03env\x18\x02 \x03(\tB\x03\x80\x01\x01R\x03env\x12\"\n" +
 	"\fcapabilities\x18\x03 \x03(\tR\fcapabilities\x12=\n" +
 	"\tresources\x18\x04 \x01(\v2\x1f.ateworker.ResourceRequirementsR\tresources\"D\n" +
