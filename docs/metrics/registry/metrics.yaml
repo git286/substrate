@@ -715,6 +715,49 @@ groups:
           ate.actor.stats.cpu.time, thus one query serves both signals.
         examples: [1.5]
 
+  - id: registry.ate.telemetry
+    type: attribute_group
+    brief: The labels of the telemetry that actors send through the worker.
+    attributes:
+      - id: ate.telemetry.signal
+        stability: development
+        brief: The OTLP signal of an export request.
+        type:
+          members:
+            - id: traces
+              stability: development
+              value: traces
+              brief: The request carried spans.
+            - id: metrics
+              stability: development
+              value: metrics
+              brief: The request carried metric data points.
+            - id: logs
+              stability: development
+              value: logs
+              brief: The request carried log records.
+      - id: ate.telemetry.plane
+        stability: development
+        brief: >
+          A resource attribute. The worker sets it on the telemetry of an actor
+          after the worker replaced the identity that the actor sent.
+        note: This key is a resource attribute. No instrument has it as a label.
+        type:
+          members:
+            - id: actor
+              stability: development
+              value: actor
+              brief: The telemetry came from an actor.
+      - id: ate.worker.slot
+        stability: development
+        type: int
+        brief: >
+          A resource attribute on the telemetry of an actor. It is the number of
+          the actor among the actors that the worker hosts at one time. Two
+          actors on one worker do not have the same slot at the same time.
+        note: This key is a resource attribute. No instrument has it as a label.
+        examples: [0, 3]
+
   - id: registry.ate.deviation
     type: attribute_group
     brief: >
@@ -1244,6 +1287,63 @@ groups:
         code_anchor: cmd/atelet/internal/snapshottracker/metrics.go
         cuj: Do background uploads keep up on a node, or would a loss of the node lose old actor state?
     attributes: []
+
+  - id: metric.ate.actor.telemetry.requests
+    type: metric
+    metric_name: ate.actor.telemetry.requests
+    instrument: counter
+    unit: "{request}"
+    stability: development
+    brief: The number of OTLP export requests that actors sent to the relay of the worker.
+    note: >
+      The worker serves an OTLP endpoint to each actor and sends the requests
+      to atelet. error.type is ResourceExhausted when the actor is over its
+      request budget. It is Unavailable when the worker has no socket to
+      atelet. Other values come from atelet or from the collector. A request
+      that is larger than the size limit is not in this count.
+    annotations:
+      substrate:
+        emitted_by: [ateworker-gvisor, ateworker-microvm]
+        golden_signals: [traffic, errors]
+        code_anchor: internal/actorotlp/relay.go
+        cuj: An actor sends telemetry, and the backend shows none. Did the worker refuse it?
+    attributes:
+      - ref: ate.telemetry.signal
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: error.type
+        requirement_level:
+          conditionally_required: The request failed. If this key is absent, atelet accepted the request.
+
+  - id: metric.ate.actor.telemetry.items
+    type: metric
+    metric_name: ate.actor.telemetry.items
+    instrument: counter
+    unit: "{item}"
+    stability: development
+    brief: The number of spans, metric data points and log records in the export requests of the actors.
+    note: >
+      This counter has the same labels as ate.actor.telemetry.requests. With
+      error.type it shows how much telemetry the worker refused.
+    annotations:
+      substrate:
+        emitted_by: [ateworker-gvisor, ateworker-microvm]
+        golden_signals: [traffic, errors]
+        code_anchor: internal/actorotlp/relay.go
+        cuj: The worker refused telemetry from the actors of a template. How much?
+    attributes:
+      - ref: ate.telemetry.signal
+        requirement_level: required
+      - ref: ate.template.atespace
+        requirement_level: required
+      - ref: ate.template.name
+        requirement_level: required
+      - ref: error.type
+        requirement_level:
+          conditionally_required: The request failed. If this key is absent, atelet accepted the request.
 
   - id: metric.ate.actor.stats.cpu.time
     type: metric

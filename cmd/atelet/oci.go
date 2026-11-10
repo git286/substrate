@@ -29,6 +29,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/moby/sys/user"
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
+	"go.ate.dev/substrate/internal/actorotlp"
 	"go.ate.dev/substrate/internal/imagecache"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
@@ -211,10 +212,9 @@ func resolveImageVolumes(ctx context.Context, imageCache *imagecache.Store, volu
 	return out, nil
 }
 
-// resolveActorEnv computes the final container environment from the image's ENV
-// and the ActorTemplate env, with the template taking precedence. Duplicate keys
-// are removed in favor of template env > image env, and a default PATH stands in
-// when neither source sets one.
+// resolveActorEnv computes the final container environment from the
+// ActorTemplate env, the actor telemetry defaults, and the image's ENV, in that
+// order of precedence. A default PATH stands in when no source sets one.
 func resolveActorEnv(imageCfg *v1.Config, templateEnv []string) []string {
 	var imageEnv []string
 	if imageCfg != nil {
@@ -238,6 +238,9 @@ func resolveActorEnv(imageCfg *v1.Config, templateEnv []string) []string {
 	}
 
 	add(templateEnv...)
+	// Above the image, so an image's own OTEL_* cannot point an actor past the
+	// worker's relay.
+	add(actorotlp.ActorEnv()...)
 	add(imageEnv...)
 	add("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	return out

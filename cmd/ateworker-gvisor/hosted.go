@@ -98,6 +98,9 @@ func (s *AteWorkerService) hostActor(ctx context.Context, attribution resources.
 	// evict drops the reservation when network setup fails.
 	evict := func() {
 		hosted.cancel()
+		if s.actorTelemetry != nil {
+			s.actorTelemetry.Release(uid)
+		}
 		s.actorsMu.Lock()
 		delete(s.actors, uid)
 		s.actorsMu.Unlock()
@@ -109,12 +112,23 @@ func (s *AteWorkerService) hostActor(ctx context.Context, attribution resources.
 		}
 	}
 
+	// Registered before the listener serves, so every connection it accepts
+	// is this activation's.
+	var services []actornet.SandboxService
+	if s.actorTelemetry != nil {
+		if err := s.actorTelemetry.Register(attribution); err != nil {
+			evict()
+			return nil, err
+		}
+		services = append(services, s.actorTelemetry)
+	}
+
 	session, err := actornet.ServeSandbox(ctx, actornet.SandboxNetworkConfig{
 		ActorUID:   uid,
 		Veth:       true,
 		EgressPort: s.tunnel.EgressPort,
 		DNSPolicy:  s.tunnel.ActorEgressPolicy(attribution),
-	}, s.tunnel.Egress, s.tunnel.DNSRelay)
+	}, s.tunnel.Egress, s.tunnel.DNSRelay, services...)
 	if err != nil {
 		evict()
 		return nil, fmt.Errorf("while setting up the sandbox network: %w", err)
@@ -152,6 +166,11 @@ func (s *AteWorkerService) unhostActor(ctx context.Context, actorUID string) err
 		hosted.sandbox = nil
 	}
 	s.actorsMu.Unlock()
+	// The slot is free only once the network, and with it the actor's
+	// telemetry connections, has closed.
+	if s.actorTelemetry != nil {
+		defer s.actorTelemetry.Release(actorUID)
+	}
 	if hosted.network == nil {
 		return nil
 	}

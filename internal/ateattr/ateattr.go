@@ -93,6 +93,28 @@ const (
 // Only the components that have a relay to take or miss carry it.
 const OTLPRelayKey = attribute.Key("ate.otlp.relay")
 
+// TelemetryPlaneKey is a resource attribute the worker sets on actor telemetry
+// after rewriting its identity. atelet's OTLP relay admits a resource on it.
+const TelemetryPlaneKey = attribute.Key("ate.telemetry.plane")
+
+// TelemetryPlaneActor is the TelemetryPlaneKey value for actor telemetry.
+const TelemetryPlaneActor = "actor"
+
+// WorkerSlotKey numbers the actors a worker hosts at one time. Two live actors
+// on a worker never share a slot, so worker pod plus slot names one writer and
+// is bounded by the worker's capacity.
+const WorkerSlotKey = attribute.Key("ate.worker.slot")
+
+// TelemetrySignalKey is the OTLP signal an actor export carried.
+const TelemetrySignalKey = attribute.Key("ate.telemetry.signal")
+
+// Values for TelemetrySignalKey.
+const (
+	TelemetrySignalTraces  = "traces"
+	TelemetrySignalMetrics = "metrics"
+	TelemetrySignalLogs    = "logs"
+)
+
 // ActorStateKey is log-only. It is bounded, but it is only ever recorded beside
 // actor identity, which no metric may carry.
 const ActorStateKey = attribute.Key("ate.actor.state")

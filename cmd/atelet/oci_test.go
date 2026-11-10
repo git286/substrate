@@ -29,6 +29,9 @@ import (
 
 func TestResolveActorEnv(t *testing.T) {
 	defaultPath := "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	endpoint := "OTEL_EXPORTER_OTLP_ENDPOINT=http://169.254.17.1:4317"
+	temporality := "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta"
+	interval := "OTEL_METRIC_EXPORT_INTERVAL=5000"
 
 	tests := []struct {
 		name        string
@@ -40,35 +43,41 @@ func TestResolveActorEnv(t *testing.T) {
 			name:        "template overrides image by key",
 			image:       &v1.Config{Env: []string{"FOO=image"}},
 			templateEnv: []string{"FOO=template"},
-			want:        []string{"FOO=template", defaultPath},
+			want:        []string{"FOO=template", endpoint, temporality, interval, defaultPath},
 		},
 		{
 			name:        "default PATH applies when neither sets it",
 			image:       &v1.Config{Env: []string{"FOO=image"}},
 			templateEnv: []string{"BAR=template"},
-			want:        []string{"BAR=template", "FOO=image", defaultPath},
+			want:        []string{"BAR=template", endpoint, temporality, interval, "FOO=image", defaultPath},
 		},
 		{
 			name:  "image PATH overrides default",
 			image: &v1.Config{Env: []string{"PATH=/image/bin"}},
-			want:  []string{"PATH=/image/bin"},
+			want:  []string{endpoint, temporality, interval, "PATH=/image/bin"},
 		},
 		{
 			name:        "template PATH overrides default",
 			image:       &v1.Config{},
 			templateEnv: []string{"PATH=/template/bin"},
-			want:        []string{"PATH=/template/bin"},
+			want:        []string{"PATH=/template/bin", endpoint, temporality, interval},
 		},
 		{
 			name:  "blank and keyless entries are dropped",
 			image: &v1.Config{Env: []string{"", "=novalue"}},
-			want:  []string{defaultPath},
+			want:  []string{endpoint, temporality, interval, defaultPath},
 		},
 		{
 			name:        "nil image config uses template env and default PATH",
 			image:       nil,
 			templateEnv: []string{"FOO=template"},
-			want:        []string{"FOO=template", defaultPath},
+			want:        []string{"FOO=template", endpoint, temporality, interval, defaultPath},
+		},
+		{
+			name:        "template telemetry env overrides the default, and the default overrides the image",
+			image:       &v1.Config{Env: []string{"OTEL_EXPORTER_OTLP_ENDPOINT=http://image:4317", "OTEL_METRIC_EXPORT_INTERVAL=1"}},
+			templateEnv: []string{"OTEL_METRIC_EXPORT_INTERVAL=60000"},
+			want:        []string{"OTEL_METRIC_EXPORT_INTERVAL=60000", endpoint, temporality, defaultPath},
 		},
 	}
 

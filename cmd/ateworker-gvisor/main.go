@@ -39,6 +39,7 @@ import (
 	"go.ate.dev/substrate/cmd/ateworker-gvisor/internal/cgroupstats"
 	"go.ate.dev/substrate/internal/actorlock"
 	"go.ate.dev/substrate/internal/actorlog"
+	"go.ate.dev/substrate/internal/actorotlp"
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/ateinterceptors"
 	"go.ate.dev/substrate/internal/ateworker"
@@ -65,6 +66,7 @@ import (
 	"go.ate.dev/substrate/internal/wakeupprobe"
 	"go.ate.dev/substrate/internal/workerstats"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -268,6 +270,13 @@ func do(ctx context.Context) error {
 		return err
 	}
 	ateworkerService := NewService(tunnel, actorLogger, *maxActors, flags, bootID)
+	ateworkerService.actorTelemetry, err = actorotlp.New(relayConn, actorotlp.WorkerFromEnv(*podUID), *maxActors, otel.Meter(serviceName))
+	if err != nil {
+		return err
+	}
+	if relayConn == nil {
+		slog.WarnContext(ctx, "No OTLP relay socket: actor telemetry exports will be refused as Unavailable")
+	}
 	ateworkerService.throttleMemory = cgroup.PSIEnabled(defaultCgroupRoot)
 	if !ateworkerService.throttleMemory {
 		slog.WarnContext(ctx, "Kernel has no cgroup memory pressure (PSI), so sandboxes keep memory.max and an OOM kill in one can restart the worker")
@@ -387,6 +396,8 @@ type AteWorkerService struct {
 
 	actorLogger *actorlog.ActorLogger
 	tunnel      *atunnel.Tunnel
+	// actorTelemetry serves each actor's OTLP endpoint. Nil serves none.
+	actorTelemetry *actorotlp.Relay
 	// usage writes the usage records. Nil writes none.
 	usage *workerstats.UsageEmitter
 

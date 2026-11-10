@@ -80,13 +80,31 @@ func (s *AteWorkerService) hostActor(ctx context.Context, attribution resources.
 	if err != nil {
 		return nil, err
 	}
+	// evict drops the reservation when network setup fails.
+	evict := func() {
+		if s.actorTelemetry != nil {
+			s.actorTelemetry.Release(uid)
+		}
+		s.actorsMu.Lock()
+		delete(s.actors, uid)
+		s.actorsMu.Unlock()
+	}
 	if stale != nil {
 		if err := stale.Close(ctx); err != nil {
-			s.actorsMu.Lock()
-			delete(s.actors, uid)
-			s.actorsMu.Unlock()
+			evict()
 			return nil, fmt.Errorf("while clearing stale state for actor %s: %w", uid, err)
 		}
+	}
+
+	// Registered before the listener serves, so every connection it accepts
+	// is this activation's.
+	var services []actornet.SandboxService
+	if s.actorTelemetry != nil {
+		if err := s.actorTelemetry.Register(attribution); err != nil {
+			evict()
+			return nil, err
+		}
+		services = append(services, s.actorTelemetry)
 	}
 
 	// The tap and atunnel share a namespace; the guest owns the other end.
@@ -94,11 +112,9 @@ func (s *AteWorkerService) hostActor(ctx context.Context, attribution resources.
 		ActorUID:   uid,
 		EgressPort: s.tunnel.EgressPort,
 		DNSPolicy:  s.tunnel.ActorEgressPolicy(attribution),
-	}, s.tunnel.Egress, s.tunnel.DNSRelay)
+	}, s.tunnel.Egress, s.tunnel.DNSRelay, services...)
 	if err != nil {
-		s.actorsMu.Lock()
-		delete(s.actors, uid)
-		s.actorsMu.Unlock()
+		evict()
 		return nil, fmt.Errorf("while setting up the sandbox network: %w", err)
 	}
 
@@ -141,6 +157,11 @@ func (s *AteWorkerService) unhostActor(ctx context.Context, actorUID string) err
 
 	if err := cgroup.RemoveActorLeaf(actorUID); err != nil {
 		slog.WarnContext(ctx, "Failed to remove the actor's cgroup", slog.Any("err", err))
+	}
+	// The slot is free only once the network, and with it the actor's
+	// telemetry connections, has closed.
+	if s.actorTelemetry != nil {
+		defer s.actorTelemetry.Release(actorUID)
 	}
 	if hosted.network == nil {
 		return nil

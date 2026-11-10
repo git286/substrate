@@ -39,9 +39,9 @@
 // into SDK records and re-exporting. Verbatim pass-through keeps each worker's
 // own resource (service.name, service.instance.id, pod attributes) intact, so
 // its spans stay attributed to worker instead of being absorbed into atelet's.
-// Restricting this pass-through to verified worker sources ensures that future
-// actor telemetry requiring identity rewrites (#761) will be added as an
-// explicit rewriting path alongside this forwarder; see workerServices.
+// The pass-through is restricted to sources whose identity is already right:
+// the workers, and actor telemetry a worker has rewritten and marked; see
+// workerServices and isActorPlane.
 //
 // Verbatim applies to the payload, not to the call around it. The request's
 // metadata is dropped and replaced with the headers atelet resolves from its own
@@ -75,6 +75,8 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+
+	"go.ate.dev/substrate/internal/ateattr"
 )
 
 const (
@@ -134,8 +136,8 @@ type Server struct {
 // This allowlist is a protocol contract rather than a security boundary:
 // service.name is client-provided, so a compromised process could claim an
 // worker name. Its purpose is to prevent accidental misuse (e.g. an actor SDK
-// pointed at the socket) and keep the pass-through contract explicit for #761.
-// Peer authentication, if needed, would require per-pod sockets or UDS peer
+// pointed at the socket). Actor telemetry carries its template's service.name
+// and is admitted by isActorPlane. Peer authentication, if needed, would require per-pod sockets or UDS peer
 // credentials (SO_PEERCRED) tied to #741.
 var workerServices = map[string]bool{
 	"ateworker-gvisor":  true,
@@ -173,7 +175,7 @@ func newSourceGate() *sourceGate {
 // unidentified source is the one the relay cannot vouch for.
 func (g *sourceGate) check(ctx context.Context, r *resourcepb.Resource) error {
 	name := resourceServiceName(r)
-	if workerServices[name] {
+	if workerServices[name] || isActorPlane(r) {
 		return nil
 	}
 	if g.logged == nil {
@@ -207,6 +209,18 @@ func resourceServiceName(r *resourcepb.Resource) string {
 		}
 	}
 	return ""
+}
+
+// isActorPlane reports whether r is actor telemetry a worker's relay
+// (internal/actorotlp) has rewritten. Like workerServices this is a protocol
+// contract: the socket's permissions keep actors away from it.
+func isActorPlane(r *resourcepb.Resource) bool {
+	for _, attr := range r.GetAttributes() {
+		if attr.GetKey() == string(ateattr.TelemetryPlaneKey) {
+			return attr.GetValue().GetStringValue() == ateattr.TelemetryPlaneActor
+		}
+	}
+	return false
 }
 
 // upstreamContext builds the metadata for the upstream call from atelet's own

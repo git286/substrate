@@ -428,6 +428,15 @@ func TestSourceGateLogsEachRejectionOnce(t *testing.T) {
 	if err := gate.check(context.Background(), serviceResource("ateworker-gvisor")); err != nil {
 		t.Fatalf("gate.check rejected a worker: %v", err)
 	}
+	// Actor telemetry a worker rewrote carries its template's service.name.
+	rewritten := serviceResource("some-template")
+	rewritten.Attributes = append(rewritten.Attributes, &commonpb.KeyValue{
+		Key:   "ate.telemetry.plane",
+		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "actor"}},
+	})
+	if err := gate.check(context.Background(), rewritten); err != nil {
+		t.Fatalf("gate.check rejected actor telemetry a worker rewrote: %v", err)
+	}
 
 	if got := strings.Count(buf.String(), "rejected telemetry"); got != 2 {
 		t.Errorf("logged %d rejections, want 2 (one per distinct service.name):\n%s", got, buf.String())

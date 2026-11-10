@@ -103,9 +103,12 @@ data:
           receivers: [otlp]
           processors: [batch]
           exporters: [otlp/jaeger, debug]
+        # Actor metrics arrive as delta (internal/actorotlp), and the
+        # Prometheus exporter drops delta sums. Cumulative metrics pass through
+        # deltatocumulative unchanged.
         metrics:
           receivers: [otlp]
-          processors: [batch]
+          processors: [deltatocumulative, batch]
           exporters: [prometheus, debug]
 
         # Every ate event, plus any workload that sends OTLP logs. debug is the

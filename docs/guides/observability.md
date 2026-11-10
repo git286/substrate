@@ -519,11 +519,42 @@ The relay is best-effort. If the socket is absent when ateworker starts — `ate
 
 For verified ateworker sources, the relay forwards each request verbatim rather than decoding and re-exporting, which is what keeps every ateworker its own service in Jaeger or your tracing backend instead of being absorbed into `atelet`'s. `ate-controller` injects `k8s.pod.name`, `k8s.namespace.name`, `k8s.pod.uid`, `k8s.node.name`, and `service.instance.id` directly into `OTEL_RESOURCE_ATTRIBUTES` via the Kubernetes Downward API, whether or not it has an endpoint to propagate; because the relay preserves resources verbatim, Kubernetes attributes remain intact even though the TCP connection to the collector originates from `atelet` rather than the worker pod IP (bypassing reliance on collector-side IP-based `k8sattributes` enrichment).
 
-Verbatim forwarding is restricted to known ateworker sources and refuses anything else with `PermissionDenied`. Actor telemetry is what that excludes: actors share a hostname (`actor`) and an interior IP, so their series merge unless identity is injected from outside the actor ([#761](https://github.com/agent-substrate/substrate/issues/761)) — a rewrite, which will be implemented as an explicit rewriting path alongside this forwarder.
+Verbatim forwarding is restricted to known ateworker sources and to actor telemetry an ateworker has already rewritten, which carries the resource attribute `ate.telemetry.plane=actor`. Anything else is refused with `PermissionDenied`.
+
+### Actor telemetry
+
+An actor's OpenTelemetry SDK exports to its worker. ateworker serves an OTLP endpoint to each actor at `169.254.17.1:4317`, the sandbox gateway address, from inside the actor's own network namespace ([`internal/actorotlp`](../../internal/actorotlp)). The port answers OTLP/gRPC and OTLP/HTTP with protobuf bodies. Exports do not go through the egress gateway and need no `EgressPolicy`.
+
+```
+actor SDK ──OTLP──► ateworker (169.254.17.1:4317) ──unix socket──► atelet relay ──► collector
+```
+
+`atelet` adds this environment to every actor container. A value set in the ActorTemplate's `env` takes precedence, and these take precedence over the image's:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT=http://169.254.17.1:4317
+OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
+OTEL_METRIC_EXPORT_INTERVAL=5000
+```
+
+ateworker knows which actor a connection belongs to from the listener it arrived on, and replaces the identity the actor sent:
+
+* On the resource it keeps only `telemetry.sdk.*`, `telemetry.distro.*` and `process.runtime.*`, then sets `service.name` (the template name), `service.namespace` (the template's atespace), `service.instance.id` (the worker pod UID and a slot number), `k8s.pod.uid`, `k8s.pod.name`, `k8s.namespace.name`, `k8s.node.name` (the worker pod), `ate.template.atespace`, `ate.template.name`, `ate.worker.slot` and `ate.telemetry.plane=actor`.
+* Traces and logs also get `ate.actor.uid`, `ate.actor.name` and `ate.atespace`. Metrics do not: an actor is not a metric label.
+* Below the resource it removes every `ate.*` attribute. On metric data points and exemplars it also removes `service.*`, `k8s.*`, `job` and `instance`.
+* It sets every metric data point's timestamp to its own clock, and raises a start time older than the activation to the activation. It sets each log record's observed time and leaves the event time. Span times are unchanged.
+
+Two actors on one worker never share a slot, so each metric series has one writer at a time. Actors follow each other in a slot, and the series does not mark where one ends. Use counters and histograms, and find the actor in traces and logs. A gauge keeps the last actor's value until the next one writes.
+
+Metrics must be delta. An SDK that ignores the temporality preference sends cumulative values that include what the template's golden snapshot counted. A collector in front of a cumulative backend such as Prometheus needs the `deltatocumulative` processor, as the kind collector has. That processor forgets a series that sends nothing for its `max_stale` (5 minutes by default), and the series then restarts from zero.
+
+ateworker gives each actor a request budget and answers `ResourceExhausted` beyond it. It refuses an export larger than 4 MiB or with more than 64 resources. It answers `Unavailable` when it started without the relay socket: actor telemetry has no fallback to the pod network. `ate.actor.telemetry.requests` and `ate.actor.telemetry.items` count exports and what they carried by signal, template and `error.type`.
+
+A template that sets `OTEL_EXPORTER_OTLP_ENDPOINT` to another address exports there through the egress gateway, with the identity its SDK sets. The rest of this section applies to it.
 
 ### Actor telemetry needs an egress policy
 
-An actor's own OpenTelemetry SDK does not use the relay. It dials the collector over the network like any other outbound connection, and that connection is subject to the actor egress lockdown described in [Network Egress](network-egress.md): every actor TCP connection is redirected into `atunnel` and carried to the egress gateway, which refuses anything the actor's `EgressPolicy` does not allow. An actor with no policy, or a policy with no matching rule, cannot reach the collector at all. With no policy, or a policy whose rules do not include the collector's hostname, the actor cannot even resolve the collector's name: the sandbox's DNS relay answers its queries `NXDOMAIN`, so each export fails before it connects. If a rule allows the hostname on another protocol or port (for example, `*` on port `443`), DNS resolves the name, the SDK sees `Unavailable: connection reset by peer` on each export, and the gateway logs why it denied the connection.
+An actor whose template points its exporter at the collector itself dials it like any other outbound connection, and that connection is subject to the actor egress lockdown described in [Network Egress](network-egress.md): every actor TCP connection is redirected into `atunnel` and carried to the egress gateway, which refuses anything the actor's `EgressPolicy` does not allow. An actor with no policy, or a policy with no matching rule, cannot reach the collector at all. With no policy, or a policy whose rules do not include the collector's hostname, the actor cannot even resolve the collector's name: the sandbox's DNS relay answers its queries `NXDOMAIN`, so each export fails before it connects. If a rule allows the hostname on another protocol or port (for example, `*` on port `443`), DNS resolves the name, the SDK sees `Unavailable: connection reset by peer` on each export, and the gateway logs why it denied the connection.
 
 To let an actor export, give it an `http` rule naming the collector's Service and the OTLP ports. It must be an `http` rule, not `https`: the OTLP/gRPC exporter is gRPC over cleartext HTTP/2 (h2c) on `4317`, which an `http` rule admits, and the OTLP/HTTP exporter is cleartext HTTP/1.1 on `4318`. On Kind the collector is `opentelemetry-collector.otel-system.svc`. Whatever the name, it has to match the host the actor's `OTEL_EXPORTER_OTLP_ENDPOINT` names, because the rule is matched on the request authority.
 
@@ -543,8 +574,6 @@ Three things to know when applying this:
 
 * **It is per actor.** The policy is a resource under the actor, and nothing applies one by default today. Every actor that exports telemetry needs its own, created after the actor and before, or shortly after, it is resumed. A template-level default policy is requested in [#1430](https://github.com/agent-substrate/substrate/issues/1430).
 * **A running actor recovers slowly.** If the policy is created while the actor is already exporting and failing, the SDK's gRPC client is in reconnect backoff, the sandbox's DNS relay takes up to 5s to notice the policy, and the gateway caches the missing policy for `--egress-policy-cache-ttl` (10s by default). Expect the first successful export 45s to two minutes after the policy appears. An actor whose policy exists before it starts has no such delay.
-* **The collector sees the gateway, not the actor.** The TCP connection to the collector comes from the egress gateway pod, so a collector that enriches by source IP (the `k8sattributes` processor) labels the actor's spans and metrics with the gateway's `k8s.pod.name`, `k8s.deployment.name=atenet-egress`, and `k8s.namespace.name`. The actor's `service.name` and anything it puts in `OTEL_RESOURCE_ATTRIBUTES` survive. Set the actor's identity there yourself if you need it on the backend; the relay-based path that will do this for actors is tracked in [#853](https://github.com/agent-substrate/substrate/issues/853) and [#761](https://github.com/agent-substrate/substrate/issues/761).
+* **The collector sees the gateway, not the actor.** The TCP connection to the collector comes from the egress gateway pod, so a collector that enriches by source IP (the `k8sattributes` processor) labels the actor's spans and metrics with the gateway's `k8s.pod.name`, `k8s.deployment.name=atenet-egress`, and `k8s.namespace.name`. The actor's `service.name` and anything it puts in `OTEL_RESOURCE_ATTRIBUTES` survive. Set the actor's identity there yourself if you need it on the backend.
 
 **Logs written to stdout and stderr need none of this.** ateworker reads a container's output stream inside the worker pod and writes it to the pod's own stdout, which is where [`kubectl ate logs`](#active-actor-inspection-via-cli) and a node log agent pick it up. That path never leaves the sandbox over the network, so it is untouched by the egress lockdown and works for an actor with no policy at all. The policy is only for telemetry an SDK inside the actor pushes itself: traces, metrics, and OTLP logs if `OTEL_LOGS_EXPORTER=otlp` is set in the actor.
-
-Substrate puts no OTLP configuration into an actor container. Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the ActorTemplate's container `env`; without it the SDK defaults to `localhost:4317`, where nothing listens inside the sandbox, and every export is dropped with no error at the collector.
