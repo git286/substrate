@@ -45,11 +45,18 @@ an atespace, so an actor is always addressed by `(atespace, name)`.
 > **Note:** By default, `kubectl ate logs` queries the Kubernetes API of the worker pod where the actor is *currently* running. It is designed for immediate inspection of active actors. To view historical logs across past worker pods and suspension cycles, use a centralized logging backend.
 
 #### Example 1: Actor Not Currently Running
-If an actor is suspended or not assigned to a worker pod, the CLI informs you immediately:
+If an actor is suspended or not assigned to a worker pod, the CLI informs you immediately and reports the actor's state:
 
 ```bash
 $ kubectl ate logs actor test -a demo
-Error: actor demo/test is not currently running on any worker pod
+Error: actor demo/test is not currently running on any worker pod (state=ACTOR_STATE_SUSPENDED)
+```
+
+For a crashed actor, the error also has the crash time and message from `status.crash`:
+
+```bash
+$ kubectl ate logs actor test -a demo
+Error: actor demo/test is not currently running on any worker pod (state=ACTOR_STATE_CRASHED): crashed at 2026-05-22T21:52:10Z: ResumeActor failed: wakeup probe timed out
 ```
 
 #### Example 2: Default Clean JSON Lines Output
@@ -74,6 +81,8 @@ Actor is currently running on pod ate-demo-counter/counter-d8f99-m7d96
 Actor is currently running on pod ate-demo-counter/counter-ab123-x4y5z
 {"time":"2026-05-22T21:50:02.123456789Z","count":2,"fshash":"mCY7...","level":"INFO","msg":"Count"}
 ```
+
+While the actor is not running, the CLI prints its state and waits for it to run again. If the actor crashes, the CLI exits with the same error as in Example 1, because a crashed actor does not run again until it is reverted.
 
 #### Example 4: Filtering by Container or Source
 An actor can run several containers. By default application container logs and synthetic lifecycle events (`Actor starting`, `Actor started`, `Actor checkpointing`, `Actor checkpointed`, `Actor restoring`, `Actor restored`, `Actor terminated`) are shown. The `_sandbox` logs are excluded so runsc startup diagnostics do not mix with application output. `--container` (short form `-c`) restricts the output to the named container's logs:

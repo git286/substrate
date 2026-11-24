@@ -442,7 +442,7 @@ func (r *LogsActorRunner) runOneShot(ctx context.Context) error {
 	namespace := actor.GetStatus().GetWorkerAssignment().GetWorkerNamespace()
 
 	if podName == "" || namespace == "" || actor.GetStatus().GetState() != ateapi.ActorState_ACTOR_STATE_RUNNING {
-		return fmt.Errorf("actor %s is not currently running on any worker pod", r.actorRef)
+		return notRunningError(r.actorRef, actor)
 	}
 
 	filter := r.filter
@@ -469,6 +469,19 @@ func (r *LogsActorRunner) runOneShot(ctx context.Context) error {
 		return fmt.Errorf("error reading log stream: %w", err)
 	}
 	return nil
+}
+
+// notRunningError reports the state of an actor that has no logs to read
+// because it is not running on a worker pod, and why and when it crashed if
+// it did.
+func notRunningError(ref resources.ActorRef, actor *ateapi.Actor) error {
+	state := actor.GetStatus().GetState()
+	crash := actor.GetStatus().GetCrash()
+	if state != ateapi.ActorState_ACTOR_STATE_CRASHED || crash == nil {
+		return fmt.Errorf("actor %s is not currently running on any worker pod (state=%s)", ref, state)
+	}
+	return fmt.Errorf("actor %s is not currently running on any worker pod (state=%s): crashed at %s: %s",
+		ref, state, crash.GetCrashTime().AsTime().Format(time.RFC3339), crash.GetMessage())
 }
 
 func (r *LogsActorRunner) runFollow(ctx context.Context) error {
@@ -507,8 +520,12 @@ func (r *LogsActorRunner) runFollow(ctx context.Context) error {
 		state := actor.GetStatus().GetState()
 
 		if podName == "" || namespace == "" || state != ateapi.ActorState_ACTOR_STATE_RUNNING {
+			// A crashed actor stays crashed until it is reverted.
+			if state == ateapi.ActorState_ACTOR_STATE_CRASHED {
+				return notRunningError(r.actorRef, actor)
+			}
 			if !waitingLogged || state != lastWaitingState {
-				vlogf(r.stderr, vBasic, "Actor %s is not running (state=%s); waiting for worker assignment...", r.actorRef, state)
+				fmt.Fprintf(r.stderr, "Actor %s is not running (state=%s); waiting for it to run...\n", r.actorRef, state)
 				waitingLogged = true
 				lastWaitingState = state
 			}

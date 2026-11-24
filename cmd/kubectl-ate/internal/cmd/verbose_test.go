@@ -207,7 +207,6 @@ func TestLogsActorRunner_FollowVerboseSurfacesDelaysAndErrors(t *testing.T) {
 
 	for _, want := range []string{
 		"Failed to get actor space-1/act-1: transient apiserver error",
-		"Actor space-1/act-1 is not running (state=ACTOR_STATE_SUSPENDED); waiting for worker assignment...",
 		"Failed to stream logs from pod ns-1/pod-1: kubelet stream unavailable",
 	} {
 		if !strings.Contains(gotStderr, want) {

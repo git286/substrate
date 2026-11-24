@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -924,41 +925,171 @@ func TestLogsActorRunner_Run_OneShot_SourceFilter(t *testing.T) {
 
 func TestLogsActorRunner_Run_OneShot_ActorNotRunning(t *testing.T) {
 	actorName := "act-123"
+	crashTime := time.Date(2026, 5, 16, 1, 3, 38, 0, time.UTC)
 
+	tests := []struct {
+		name    string
+		status  *ateapi.ActorStatus
+		wantErr string
+	}{
+		{
+			name:    "suspended",
+			status:  &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED},
+			wantErr: "actor space-1/act-123 is not currently running on any worker pod (state=ACTOR_STATE_SUSPENDED)",
+		},
+		{
+			name: "crashed",
+			status: &ateapi.ActorStatus{
+				State: ateapi.ActorState_ACTOR_STATE_CRASHED,
+				Crash: &ateapi.ActorCrash{
+					Message:   "ResumeActor failed: wakeup probe timed out",
+					CrashTime: timestamppb.New(crashTime),
+				},
+			},
+			wantErr: "actor space-1/act-123 is not currently running on any worker pod (state=ACTOR_STATE_CRASHED): crashed at 2026-05-16T01:03:38Z: ResumeActor failed: wakeup probe timed out",
+		},
+		{
+			name:    "crashed without crash details",
+			status:  &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_CRASHED},
+			wantErr: "actor space-1/act-123 is not currently running on any worker pod (state=ACTOR_STATE_CRASHED)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockAPI := &mockAteAPIClient{
+				GetActorFunc: func(ctx context.Context, in *ateapi.GetActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
+					return &ateapi.Actor{
+						Metadata: &ateapi.ResourceMetadata{Name: actorName},
+						Status:   tc.status,
+					}, nil
+				},
+			}
+
+			mockStreamer := &mockPodLogsStreamer{
+				StreamLogsFunc: func(ctx context.Context, ns, name string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
+					return nil, fmt.Errorf("StreamLogs should not be called")
+				},
+			}
+
+			var stdout, stderr bytes.Buffer
+			runner := &LogsActorRunner{
+				apiClient: mockAPI,
+				actorRef:  resources.ActorRef{Atespace: "space-1", Name: actorName},
+				filter:    logLineFilter{target: resources.ActorRef{Atespace: "space-1", Name: actorName}},
+				streamer:  mockStreamer,
+				stdout:    &stdout,
+				stderr:    &stderr,
+				follow:    false,
+			}
+
+			err := runner.Run(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if err.Error() != tc.wantErr {
+				t.Errorf("got error %q, want %q", err, tc.wantErr)
+			}
+
+			if mockAPI.CloseCalls != 1 {
+				t.Errorf("expected Close to be called once, got %d", mockAPI.CloseCalls)
+			}
+		})
+	}
+}
+
+// A follow reports the state of an actor it waits on, and returns once the
+// actor has crashed.
+func TestLogsActorRunner_Run_Follow_ActorCrashed(t *testing.T) {
+	actorName := "act-123"
+	podName := "pod-xyz"
+	namespace := "ns-abc"
+	crashTime := time.Date(2026, 5, 16, 1, 3, 38, 0, time.UTC)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The actor is suspended, then runs until its log stream is opened, then
+	// is crashed.
+	var mu sync.Mutex
+	var getActorCalls int
+	var streamOpened bool
 	mockAPI := &mockAteAPIClient{
 		GetActorFunc: func(ctx context.Context, in *ateapi.GetActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			getActorCalls++
+			switch {
+			case getActorCalls == 1:
+				return &ateapi.Actor{
+					Metadata: &ateapi.ResourceMetadata{Name: actorName},
+					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED},
+				}, nil
+			case !streamOpened:
+				return &ateapi.Actor{
+					Metadata: &ateapi.ResourceMetadata{Name: actorName},
+					Status: &ateapi.ActorStatus{
+						State: ateapi.ActorState_ACTOR_STATE_RUNNING,
+						WorkerAssignment: &ateapi.WorkerAssignment{
+							WorkerPod:       podName,
+							WorkerNamespace: namespace,
+						},
+					},
+				}, nil
+			}
+			if getActorCalls > 100 {
+				// The follow is still polling a crashed actor.
+				cancel()
+			}
 			return &ateapi.Actor{
 				Metadata: &ateapi.ResourceMetadata{Name: actorName},
-				Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED}, // not running
+				Status: &ateapi.ActorStatus{
+					State: ateapi.ActorState_ACTOR_STATE_CRASHED,
+					Crash: &ateapi.ActorCrash{
+						Message:   "ResumeActor failed: wakeup probe timed out",
+						CrashTime: timestamppb.New(crashTime),
+					},
+				},
 			}, nil
 		},
 	}
 
 	mockStreamer := &mockPodLogsStreamer{
 		StreamLogsFunc: func(ctx context.Context, ns, name string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
-			return nil, fmt.Errorf("StreamLogs should not be called")
+			mu.Lock()
+			defer mu.Unlock()
+			streamOpened = true
+			return io.NopCloser(strings.NewReader("")), nil
 		},
 	}
 
 	var stdout, stderr bytes.Buffer
 	runner := &LogsActorRunner{
-		apiClient: mockAPI,
-		actorRef:  resources.ActorRef{Atespace: "space-1", Name: actorName},
-		filter:    logLineFilter{target: resources.ActorRef{Atespace: "space-1", Name: actorName}},
-		streamer:  mockStreamer,
-		stdout:    &stdout,
-		stderr:    &stderr,
-		follow:    false,
+		apiClient:         mockAPI,
+		actorRef:          resources.ActorRef{Atespace: "space-1", Name: actorName},
+		filter:            logLineFilter{target: resources.ActorRef{Atespace: "space-1", Name: actorName}},
+		streamer:          mockStreamer,
+		stdout:            &stdout,
+		stderr:            &stderr,
+		follow:            true,
+		pollInterval:      1 * time.Millisecond,
+		reconnectInterval: 1 * time.Millisecond,
+		tickerInterval:    1 * time.Millisecond,
 	}
 
-	err := runner.Run(context.Background())
+	err := runner.Run(ctx)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	wantErr := "actor space-1/act-123 is not currently running on any worker pod (state=ACTOR_STATE_CRASHED): crashed at 2026-05-16T01:03:38Z: ResumeActor failed: wakeup probe timed out"
+	if err.Error() != wantErr {
+		t.Errorf("got error %q, want %q", err, wantErr)
+	}
 
-	wantErrMsg := "actor space-1/act-123 is not currently running on any worker pod"
-	if !strings.Contains(err.Error(), wantErrMsg) {
-		t.Errorf("unexpected error message: %v (expected substring %q)", err, wantErrMsg)
+	wantStderr := "Actor space-1/act-123 is not running (state=ACTOR_STATE_SUSPENDED); waiting for it to run...\n" +
+		"Actor is currently running on pod ns-abc/pod-xyz\n"
+	if got := stderr.String(); got != wantStderr {
+		t.Errorf("got stderr %q, want %q", got, wantStderr)
 	}
 
 	if mockAPI.CloseCalls != 1 {
